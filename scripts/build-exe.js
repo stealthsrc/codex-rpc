@@ -56,6 +56,8 @@ function runPkg() {
     '.',
     '--targets',
     NODE_TARGET,
+    '--compress',
+    'Brotli',
     '--output',
     path.join('bin', 'codex-rich-presence.exe'),
   ];
@@ -66,6 +68,17 @@ function runPkg() {
   });
   if (res.status !== 0) throw new Error(`pkg exited with code ${res.status}`);
 }
+
+// UPX is intentionally NOT invoked here: pkg's loader `fs.openSync`s its own
+// EXE on disk and seeks to a fixed payload offset. UPX unpacks the PE in
+// memory at startup, so the on-disk file pkg reads is still the compressed
+// form — the payload offsets don't match and the loader crashes with
+// "Pkg: Error reading from file."
+//
+// Brotli payload compression via pkg itself (see runPkg) is the safe path
+// and shrinks the EXE ~11%. Further gains would require swapping pkg for
+// Node SEA + a wrapper that handles decompression before the Node runtime
+// starts.
 
 async function stampBase(basePath) {
   const rcedit = require('rcedit');
