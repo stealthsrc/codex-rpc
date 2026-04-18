@@ -80,6 +80,10 @@ async function main(): Promise<void> {
       }
     }
 
+    // Status file is written every tick — it feeds the tray, which needs to
+    // reflect RPC connection flips even when the Codex detection is stable.
+    writeStatus(formatStatusLine(result, rpc.isReady()));
+
     const startMs = result.startedAt?.getTime() ?? null;
     const codexKey =
       `${result.codex?.model ?? ''}|${result.codex?.effort ?? ''}|` +
@@ -106,8 +110,6 @@ async function main(): Promise<void> {
     } else {
       rpc.clearActivity();
     }
-
-    writeStatus(formatStatusLine(result, rpc.isReady()));
   };
 
   await runOnce();
