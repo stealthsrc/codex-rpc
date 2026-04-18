@@ -1,0 +1,37 @@
+{
+  "name": "codex-rich-presence",
+  "version": "0.1.0",
+  "description": "Discord Rich Presence for OpenAI Codex (CLI + desktop app) on Windows",
+  "main": "dist/index.js",
+  "bin": {
+    "codex-rich-presence": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pkg": "pkg . --targets node22-win-x64 --output bin/codex-rich-presence.exe",
+    "dist": "node scripts/build-exe.js"
+  },
+  "pkg": {
+    "scripts": "dist/**/*.js",
+    "assets": ["assets/app.ico"]
+  },
+  "author": "StealthyLabs",
+  "license": "MIT",
+  "dependencies": {
+    "@xhayper/discord-rpc": "^1.2.0",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@yao-pkg/pkg": "^6.1.1",
+    "rcedit": "^4.0.1",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

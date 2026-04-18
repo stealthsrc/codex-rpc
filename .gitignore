@@ -1,0 +1,14 @@
+node_modules/
+dist/
+bin/
+tmp/
+*.log
+.env
+.env.local
+.DS_Store
+coverage/
+.vscode/
+.idea/
+*.tsbuildinfo
+CLAUDE.md
+
