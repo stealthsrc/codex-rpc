@@ -141,6 +141,10 @@ $modelItem = $menu.Items.Add('')
 $modelItem.Enabled = $false
 $modelItem.Visible = $false
 
+$discordItem = $menu.Items.Add('')
+$discordItem.Enabled = $false
+$discordItem.Visible = $false
+
 [void] $menu.Items.Add('-')
 
 $runKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
@@ -198,7 +202,7 @@ $timer.Add_Tick({
     if (Test-Path $statusFile) {
       $line = [System.IO.File]::ReadAllText($statusFile, [System.Text.UTF8Encoding]::new()).Trim()
       if ($line) {
-        $parts = $line -split '\\|', 2
+        $parts = $line -split '\\|', 3
         $stateItem.Text = $parts[0]
         if ($parts.Length -gt 1 -and $parts[1]) {
           $modelItem.Text = $parts[1]
@@ -206,8 +210,15 @@ $timer.Add_Tick({
         } else {
           $modelItem.Visible = $false
         }
-        $tooltipLen = [Math]::Min(63, $line.Length)
-        $notifyIcon.Text = 'Codex RP | ' + $line.Substring(0, $tooltipLen)
+        if ($parts.Length -gt 2 -and $parts[2]) {
+          $discordItem.Text = $parts[2]
+          $discordItem.Visible = $true
+        } else {
+          $discordItem.Visible = $false
+        }
+        $tooltipSource = ($parts -join ' | ')
+        $tooltipLen = [Math]::Min(63, $tooltipSource.Length)
+        $notifyIcon.Text = 'Codex RP | ' + $tooltipSource.Substring(0, $tooltipLen)
       }
     }
   } catch { }

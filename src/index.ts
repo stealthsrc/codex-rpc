@@ -107,8 +107,7 @@ async function main(): Promise<void> {
       rpc.clearActivity();
     }
 
-    // Tray file channel: "State | Model · Effort". Pipe separates the two lines.
-    writeStatus(formatStatusLine(result));
+    writeStatus(formatStatusLine(result, rpc.isReady()));
   };
 
   await runOnce();
@@ -160,7 +159,13 @@ function resolveStartupCommand(): string {
   return `"${exe}" "${entry}"`;
 }
 
-function formatStatusLine(result: DetectionResult): string {
+/**
+ * Pipe-separated tray status line:
+ *   "{Codex state}|{Model · Effort}|{Discord state}"
+ * The trailing field is optional for older tray scripts — appended last so
+ * unaware readers can still parse the first two.
+ */
+function formatStatusLine(result: DetectionResult, rpcReady: boolean): string {
   const stateLabel =
     result.state === 'both'
       ? 'Codex: CLI/Desktop'
@@ -171,8 +176,9 @@ function formatStatusLine(result: DetectionResult): string {
           : 'Codex: Off';
   const model = formatModel(result.codex?.model ?? null);
   const effort = formatEffort(result.codex?.effort ?? null);
-  const rhs = [model, effort].filter((p): p is string => Boolean(p)).join(' · ');
-  return rhs ? `${stateLabel}|${rhs}` : stateLabel;
+  const modelLine = [model, effort].filter((p): p is string => Boolean(p)).join(' · ');
+  const discordLine = rpcReady ? 'Discord: Connected' : 'Discord: RPC Disabled';
+  return `${stateLabel}|${modelLine}|${discordLine}`;
 }
 
 function resolveTrayIcon(): string | undefined {

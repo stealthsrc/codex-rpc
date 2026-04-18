@@ -103,6 +103,10 @@ export class RpcClient {
     if (this.ready) this.flushPending();
   }
 
+  isReady(): boolean {
+    return this.ready;
+  }
+
   async destroy(): Promise<void> {
     this.destroyed = true;
     this.cancelReconnect();
