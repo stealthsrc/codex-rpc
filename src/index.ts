@@ -1,10 +1,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, type ForcedState } from './config';
+import {
+  loadConfig,
+  resolveRpcActivityMode,
+  resolveRpcButtons,
+  rpcButtonsFilePath,
+  type ForcedState,
+} from './config';
 import { Detector, type DetectionResult, type PresenceState } from './detector';
 import { formatEffort, formatModel, readCodexConfig } from './detector/codex-config';
 import { readLatestCodexSession } from './detector/codex-session';
+import { formatCodexUsage, readLatestCodexUsage } from './detector/codex-usage';
 import { RpcClient } from './rpc/client';
 import { buildPresence } from './rpc/presence-builder';
 import { runStatus } from './status';
@@ -20,7 +27,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const noTray = process.argv.includes('--no-tray') || process.platform !== 'win32';
+  const useLegacyTray = process.argv.includes('--legacy-tray') && process.platform === 'win32';
 
   const cfg = loadConfig();
   initLogger({ level: cfg.logLevel, logFile: cfg.logFile });
@@ -63,14 +70,22 @@ async function main(): Promise<void> {
   let lastState: PresenceState = 'idle';
   let lastStart: number | null = null;
   let lastCodexKey = '';
+  let rpcButtons = cfg.rpcButtons;
+  let rpcActivityMode = cfg.rpcActivityMode;
+  let rpcSettingsModifiedMs = getFileModifiedMs(rpcButtonsFilePath());
   let stopped = false;
 
   const runOnce = async (): Promise<void> => {
+    if (reloadRpcSettingsIfChanged()) {
+      rpc.clearActivity();
+    }
+
     let result: DetectionResult;
     if (cfg.forceState) {
       result = forcedResult(cfg.forceState);
       result.codex = readCodexConfig();
       result.session = result.state === 'idle' ? null : readLatestCodexSession();
+      result.usage = readLatestCodexUsage();
     } else {
       try {
         result = await detector.tick();
@@ -82,12 +97,14 @@ async function main(): Promise<void> {
 
     // Status file is written every tick — it feeds the tray, which needs to
     // reflect RPC connection flips even when the Codex detection is stable.
-    writeStatus(formatStatusLine(result, rpc.isReady()));
+    writeStatus(formatStatusLine(result, rpc.isReady(), rpc.getUserLabel()));
 
     const startMs = result.startedAt?.getTime() ?? null;
     const codexKey =
       `${result.codex?.model ?? ''}|${result.codex?.effort ?? ''}|` +
-      `${result.codex?.serviceTier ?? ''}|${result.session?.repoName ?? ''}`;
+      `${result.codex?.serviceTier ?? ''}|${result.session?.repoName ?? ''}|` +
+      `${rpcActivityMode}|` +
+      `${rpcButtons.map((button) => `${button.label}:${button.url}`).join(',')}`;
     if (result.state === lastState && startMs === lastStart && codexKey === lastCodexKey) {
       return;
     }
@@ -104,7 +121,7 @@ async function main(): Promise<void> {
     lastStart = startMs;
     lastCodexKey = codexKey;
 
-    const payload = buildPresence(result);
+    const payload = buildPresence(result, rpcButtons, rpcActivityMode);
     if (payload) {
       rpc.setActivity(payload);
     } else {
@@ -140,12 +157,36 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGHUP', () => void shutdown('SIGHUP'));
 
-  if (!noTray) {
+  if (useLegacyTray) {
     tray = startTray({
       iconPath: resolveTrayIcon(),
+      rpcButtonsPath: rpcButtonsFilePath(),
       startupCommand: resolveStartupCommand(),
+      onButtonsChanged: () => {
+        rpcButtons = resolveRpcButtons();
+        rpcActivityMode = resolveRpcActivityMode();
+        rpcSettingsModifiedMs = getFileModifiedMs(rpcButtonsFilePath());
+        lastCodexKey = '';
+        log.info({ count: rpcButtons.length, mode: rpcActivityMode }, 'rpc buttons reloaded');
+        rpc.clearActivity();
+        setTimeout(() => {
+          if (!stopped) void runOnce();
+        }, 1000);
+      },
       onQuit: () => void shutdown('tray-quit'),
     });
+  }
+
+  function reloadRpcSettingsIfChanged(): boolean {
+    const modifiedMs = getFileModifiedMs(rpcButtonsFilePath());
+    if (modifiedMs === rpcSettingsModifiedMs) return false;
+
+    rpcSettingsModifiedMs = modifiedMs;
+    rpcButtons = resolveRpcButtons();
+    rpcActivityMode = resolveRpcActivityMode();
+    lastCodexKey = '';
+    log.info({ count: rpcButtons.length, mode: rpcActivityMode }, 'rpc settings reloaded');
+    return true;
   }
 }
 
@@ -167,7 +208,11 @@ function resolveStartupCommand(): string {
  * The trailing field is optional for older tray scripts — appended last so
  * unaware readers can still parse the first two.
  */
-function formatStatusLine(result: DetectionResult, rpcReady: boolean): string {
+function formatStatusLine(
+  result: DetectionResult,
+  rpcReady: boolean,
+  discordUser: string | null,
+): string {
   const stateLabel =
     result.state === 'both'
       ? 'Codex: CLI/Desktop'
@@ -178,9 +223,20 @@ function formatStatusLine(result: DetectionResult, rpcReady: boolean): string {
           : 'Codex: Off';
   const model = formatModel(result.codex?.model ?? null);
   const effort = formatEffort(result.codex?.effort ?? null);
-  const modelLine = [model, effort].filter((p): p is string => Boolean(p)).join(' · ');
-  const discordLine = rpcReady ? 'Discord: Connected' : 'Discord: RPC Disabled';
-  return `${stateLabel}|${modelLine}|${discordLine}`;
+  const modelLine = [model, effort].filter((p): p is string => Boolean(p)).join(' - ');
+  const usageLine = formatCodexUsage(result.usage);
+  const discordLine = rpcReady
+    ? `Discord: Connected${discordUser ? ` (${discordUser})` : ''}`
+    : 'Discord: RPC Disabled';
+  return `${stateLabel}|${modelLine}|${usageLine ?? ''}|${discordLine}`;
+}
+
+function getFileModifiedMs(filePath: string): number | null {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 function resolveTrayIcon(): string | undefined {
@@ -220,6 +276,7 @@ function forcedResult(forced: Exclude<ForcedState, null>): DetectionResult {
       processCounts: { cli: 0, app: 0, unknown: 0 },
       codex: null,
       session: null,
+      usage: null,
     };
   }
   const now = new Date();
@@ -228,7 +285,14 @@ function forcedResult(forced: Exclude<ForcedState, null>): DetectionResult {
     app: forced === 'app' || forced === 'both' ? 1 : 0,
     unknown: 0,
   };
-  return { state: forced, startedAt: now, processCounts: counts, codex: null, session: null };
+  return {
+    state: forced,
+    startedAt: now,
+    processCounts: counts,
+    codex: null,
+    session: null,
+    usage: null,
+  };
 }
 
 main().catch((err) => {

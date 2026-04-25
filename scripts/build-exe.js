@@ -36,7 +36,7 @@ const EXPECTED_SHAS = path.join(
   'expected-shas.json',
 );
 
-const exePath = path.join(ROOT, 'bin', 'codex-rich-presence.exe');
+const exePath = path.join(ROOT, 'bin', 'codex-rpc-daemon.exe');
 const iconPath = path.join(ROOT, 'assets', 'app.ico');
 const pkgJson = require(path.join(ROOT, 'package.json'));
 
@@ -51,20 +51,22 @@ function sha256(filePath) {
 }
 
 function runPkg() {
-  const bin = process.platform === 'win32' ? 'pkg.cmd' : 'pkg';
+  const bin = process.execPath;
+  const pkgBin = path.join(ROOT, 'node_modules', '@yao-pkg', 'pkg', 'lib-es5', 'bin.js');
   const args = [
+    pkgBin,
     '.',
     '--targets',
     NODE_TARGET,
     '--compress',
     'Brotli',
     '--output',
-    path.join('bin', 'codex-rich-presence.exe'),
+    path.join('bin', 'codex-rpc-daemon.exe'),
   ];
   const res = spawnSync(bin, args, {
     cwd: ROOT,
     stdio: 'inherit',
-    shell: process.platform === 'win32',
+    shell: false,
   });
   if (res.status !== 0) throw new Error(`pkg exited with code ${res.status}`);
 }
@@ -89,7 +91,7 @@ async function stampBase(basePath) {
       FileDescription: pkgJson.description || 'Codex Rich Presence',
       CompanyName: pkgJson.author || '',
       LegalCopyright: `(C) ${new Date().getFullYear()} ${pkgJson.author || ''}`,
-      OriginalFilename: 'codex-rich-presence.exe',
+      OriginalFilename: 'codex-rpc-daemon.exe',
     },
     'file-version': pkgJson.version || '0.0.0',
     'product-version': pkgJson.version || '0.0.0',

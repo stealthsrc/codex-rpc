@@ -78,6 +78,8 @@ describe('StateMachine', () => {
     startedAt,
     processCounts: baseCounts(state),
     codex: null,
+    session: null,
+    usage: null,
   });
 
   it('emits non-idle directly', () => {

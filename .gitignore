@@ -1,6 +1,9 @@
 node_modules/
 dist/
 bin/
+src-tauri/binaries/
+src-tauri/gen/
+src-tauri/target/
 tmp/
 *.log
 .env

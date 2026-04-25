@@ -107,6 +107,12 @@ export class RpcClient {
     return this.ready;
   }
 
+  getUserLabel(): string | null {
+    const username = this.client?.user?.username?.trim();
+    if (!username) return null;
+    return username.replace(/[\u0000-\u001F\u007F-\u009F]/g, '').slice(0, 32);
+  }
+
   async destroy(): Promise<void> {
     this.destroyed = true;
     this.cancelReconnect();
@@ -144,11 +150,16 @@ export class RpcClient {
     log.trace({ payload }, 'rpc: setActivity payload');
     user
       .setActivity({
+        name: payload.name,
+        type: payload.type,
         details: payload.details,
         state: payload.state,
         startTimestamp: payload.startTimestamp,
         largeImageKey: payload.largeImageKey,
         largeImageText: payload.largeImageText,
+        smallImageKey: payload.smallImageKey,
+        smallImageText: payload.smallImageText,
+        buttons: payload.buttons,
         instance: payload.instance ?? false,
       })
       .catch((err: Error) => {

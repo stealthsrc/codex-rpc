@@ -2,6 +2,7 @@ import { getLogger } from '../utils/logger';
 import { classify } from './classifier';
 import { readCodexConfig } from './codex-config';
 import { readLatestCodexSession } from './codex-session';
+import { readLatestCodexUsage } from './codex-usage';
 import { scanCodexProcesses } from './process-scanner';
 import { deriveState, StateMachine, type DetectionResult } from './state';
 
@@ -52,6 +53,7 @@ export class Detector {
     const raw = deriveState(classified);
     raw.codex = readCodexConfig();
     raw.session = raw.state === 'idle' ? null : readLatestCodexSession();
+    raw.usage = readLatestCodexUsage();
     const result = this.machine.step(raw);
     return result;
   }

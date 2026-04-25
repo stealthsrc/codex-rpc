@@ -49,6 +49,20 @@ describe('acquireSingleInstanceLock', () => {
     a.release();
   });
 
+  it('reclaims a forged lock whose PID does not match the executable path', () => {
+    fs.mkdirSync(lockDir(), { recursive: true });
+    const fakeExe = path.join(lockDir(), 'fake.exe');
+    fs.writeFileSync(fakeExe, '');
+    fs.writeFileSync(
+      path.join(lockDir(), 'instance.lock'),
+      JSON.stringify({ pid: process.pid, startTimeMs: Date.now(), exe: fakeExe }),
+    );
+
+    const a = acquireSingleInstanceLock(APP_NAME);
+    expect(a.acquired).toBe(true);
+    a.release();
+  });
+
   it('release removes the lock file', () => {
     const a = acquireSingleInstanceLock(APP_NAME);
     expect(a.acquired).toBe(true);

@@ -1,8 +1,20 @@
 import 'dotenv/config';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 
 export type ForcedState = 'cli' | 'app' | 'both' | 'idle' | null;
+
+export interface RpcButtonConfig {
+  label: string;
+  url: string;
+}
+
+export type RpcActivityMode = 'playing' | 'watching' | 'listening' | 'competing';
+
+const LOCAL_APP_DATA = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
+const APP_DATA_DIR = path.join(LOCAL_APP_DATA, 'codex-rich-presence');
+const RPC_BUTTONS_PATH = path.join(APP_DATA_DIR, 'rpc-buttons.json');
 
 function parseInt10(value: string | undefined, fallback: number, min: number): number {
   if (!value) return fallback;
@@ -51,6 +63,94 @@ function parseForcedState(value: string | undefined): ForcedState {
   return null;
 }
 
+export function rpcButtonsFilePath(): string {
+  return RPC_BUTTONS_PATH;
+}
+
+export function resolveRpcButtons(
+  env: NodeJS.ProcessEnv = process.env,
+  filePath: string = RPC_BUTTONS_PATH,
+): RpcButtonConfig[] {
+  const fileButtons = readRpcButtonsFile(filePath);
+  const buttons: RpcButtonConfig[] = [...fileButtons];
+  for (const index of [1, 2]) {
+    const label = sanitizeButtonLabel(env[`RPC_BUTTON_${index}_LABEL`]);
+    const url = sanitizeButtonUrl(env[`RPC_BUTTON_${index}_URL`]);
+    if (label && url) buttons[index - 1] = { label, url };
+  }
+  return buttons.filter(Boolean).slice(0, 2);
+}
+
+export function resolveRpcActivityMode(
+  env: NodeJS.ProcessEnv = process.env,
+  filePath: string = RPC_BUTTONS_PATH,
+): RpcActivityMode {
+  const envMode = parseRpcActivityMode(env.RPC_ACTIVITY_MODE);
+  if (envMode) return envMode;
+  return readRpcActivityModeFile(filePath);
+}
+
+function parseRpcActivityMode(value: string | undefined): RpcActivityMode | null {
+  if (!value) return null;
+  const v = value.trim().toLowerCase();
+  if (v === 'tv' || v === 'watching') return 'watching';
+  if (v === 'playing' || v === 'play') return 'playing';
+  if (v === 'listening' || v === 'listen') return 'listening';
+  if (v === 'competing' || v === 'compete') return 'competing';
+  return null;
+}
+
+function readRpcActivityModeFile(filePath: string): RpcActivityMode {
+  try {
+    const raw = stripBom(fs.readFileSync(filePath, 'utf8'));
+    const parsed = JSON.parse(raw) as { mode?: unknown };
+    return parseRpcActivityMode(typeof parsed.mode === 'string' ? parsed.mode : undefined) ?? 'playing';
+  } catch {
+    return 'playing';
+  }
+}
+
+function readRpcButtonsFile(filePath: string): RpcButtonConfig[] {
+  try {
+    const raw = stripBom(fs.readFileSync(filePath, 'utf8'));
+    const parsed = JSON.parse(raw) as { buttons?: Array<{ label?: unknown; url?: unknown }> };
+    if (!Array.isArray(parsed.buttons)) return [];
+    return parsed.buttons
+      .map((button) => {
+        const label = sanitizeButtonLabel(typeof button.label === 'string' ? button.label : undefined);
+        const url = sanitizeButtonUrl(typeof button.url === 'string' ? button.url : undefined);
+        return label && url ? { label, url } : null;
+      })
+      .filter((button): button is RpcButtonConfig => Boolean(button))
+      .slice(0, 2);
+  } catch {
+    return [];
+  }
+}
+
+function stripBom(value: string): string {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+}
+
+function sanitizeButtonLabel(value: string | undefined): string | null {
+  if (!value) return null;
+  const cleaned = value.replace(/[\u0000-\u001F\u007F-\u009F]/g, '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return null;
+  return cleaned.length > 32 ? cleaned.slice(0, 32) : cleaned;
+}
+
+function sanitizeButtonUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+
 /**
  * Default Discord Application ID shipped with this build.
  * Application IDs are public identifiers, not secrets — every Rich Presence
@@ -66,6 +166,8 @@ export interface AppConfig {
   logLevel: string;
   logFile: string | null;
   forceState: ForcedState;
+  rpcButtons: RpcButtonConfig[];
+  rpcActivityMode: RpcActivityMode;
 }
 
 export function loadConfig(): AppConfig {
@@ -81,5 +183,7 @@ export function loadConfig(): AppConfig {
     logLevel: process.env.LOG_LEVEL?.trim() || 'info',
     logFile,
     forceState: parseForcedState(process.env.FORCE_STATE),
+    rpcButtons: resolveRpcButtons(),
+    rpcActivityMode: resolveRpcActivityMode(),
   };
 }

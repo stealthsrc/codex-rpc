@@ -1,6 +1,7 @@
 import type { Classification } from './classifier';
 import type { CodexConfig } from './codex-config';
 import type { CodexSessionSnapshot } from './codex-session';
+import type { CodexUsageSnapshot } from './codex-usage';
 import type { ProcessSnapshot } from './process-scanner';
 
 export type PresenceState = 'idle' | 'cli' | 'app' | 'both';
@@ -16,6 +17,7 @@ export interface DetectionResult {
   processCounts: { cli: number; app: number; unknown: number };
   codex: CodexConfig | null;
   session: CodexSessionSnapshot | null;
+  usage: CodexUsageSnapshot | null;
 }
 
 export function deriveState(classified: ClassifiedProcess[]): DetectionResult {
@@ -48,6 +50,7 @@ export function deriveState(classified: ClassifiedProcess[]): DetectionResult {
     processCounts: { cli, app, unknown },
     codex: null,
     session: null,
+    usage: null,
   };
 }
 
@@ -69,6 +72,7 @@ export class StateMachine {
     processCounts: { cli: 0, app: 0, unknown: 0 },
     codex: null,
     session: null,
+    usage: null,
   };
   private anchorStart: Date | null = null;
 

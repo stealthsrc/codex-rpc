@@ -45,15 +45,16 @@ describe('readLatestCodexSession', () => {
   });
 
   it('picks the most recent rollout file', () => {
+    const now = Date.now();
     writeRollout(
       '2026/04/17/rollout-2026-04-17T10-00-00-old.jsonl',
       { cwd: 'D:\\old', originator: 'codex-tui' },
-      new Date('2026-04-17T10:00:00Z'),
+      new Date(now - 2_000),
     );
     writeRollout(
       '2026/04/18/rollout-2026-04-18T09-00-00-new.jsonl',
       { cwd: 'D:\\new\\project', originator: 'codex-tui' },
-      new Date('2026-04-18T09:00:00Z'),
+      new Date(now - 1_000),
     );
     const session = readLatestCodexSession(root);
     expect(session?.cwd).toBe('D:\\new\\project');

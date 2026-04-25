@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -15,15 +16,24 @@ interface LockRecord {
   exe: string;
 }
 
+interface ProcessIdentity {
+  exe: string;
+  startTimeMs: number;
+}
+
+const PROCESS_START_TOLERANCE_MS = 30_000;
+const POWERSHELL_PATH = path.join(
+  process.env.SystemRoot ?? 'C:\\Windows',
+  'System32',
+  'WindowsPowerShell',
+  'v1.0',
+  'powershell.exe',
+);
+
 /**
  * Lock file holds a JSON record identifying the owner: PID, Node start time,
  * and the Node `execPath`. A forged lock file containing an arbitrary PID
- * (e.g. explorer.exe) is rejected because the record won't match that
- * process's identity, letting us reclaim the lock without DoS.
- *
- * On Windows, named mutexes would be stronger, but require a native addon.
- * This file-based scheme closes the obvious spoof vector while staying
- * pure-JS + `pkg`-friendly.
+ * is rejected because the record must match the process identity.
  */
 export function acquireSingleInstanceLock(appName = 'codex-rich-presence'): LockResult {
   const dir = path.join(
@@ -53,7 +63,6 @@ export function acquireSingleInstanceLock(appName = 'codex-rich-presence'): Lock
   let { fd, existing } = tryAcquire();
 
   if (!fd && (existing === null || !isOwnerAlive(existing))) {
-    // Stale or forged — reclaim.
     try {
       fs.unlinkSync(lockPath);
     } catch {
@@ -77,8 +86,6 @@ export function acquireSingleInstanceLock(appName = 'codex-rich-presence'): Lock
       /* ignore */
     }
     try {
-      // Only unlink if it still holds our record — avoid deleting someone
-      // else's lock in rare PID-reuse scenarios.
       const current = readLockRecord(lockPath);
       if (
         current &&
@@ -108,7 +115,6 @@ function readLockRecord(lockPath: string): LockRecord | null {
     ) {
       return parsed;
     }
-    // Legacy plain-PID lock from prior versions — accept but treat as weak.
     const legacyPid = parseInt(raw, 10);
     if (Number.isFinite(legacyPid)) {
       return { pid: legacyPid, startTimeMs: 0, exe: '' };
@@ -119,23 +125,17 @@ function readLockRecord(lockPath: string): LockRecord | null {
   }
 }
 
-/**
- * A lock record is "alive" iff the PID still exists AND the process start
- * time matches AND the image path matches (when we have one). That prevents
- * PID-reuse spoofs like "I stuck explorer.exe's PID in your lock file".
- */
 function isOwnerAlive(record: LockRecord): boolean {
   if (!pidExists(record.pid)) return false;
-  // Legacy records without identity metadata — best effort: honour the PID.
-  if (!record.exe || record.startTimeMs === 0) return true;
-  try {
-    const stat = fs.statSync(record.exe);
-    return stat.isFile();
-    // Note: confirming actual identity against the running process requires
-    // WMI; current check is a weak signal. Documented in security review.
-  } catch {
-    return false;
-  }
+  if (!record.exe || record.startTimeMs === 0) return false;
+
+  const identity = getProcessIdentity(record.pid);
+  if (!identity) return false;
+
+  return (
+    normalizeExePath(identity.exe) === normalizeExePath(record.exe) &&
+    Math.abs(identity.startTimeMs - record.startTimeMs) <= PROCESS_START_TOLERANCE_MS
+  );
 }
 
 function pidExists(pid: number): boolean {
@@ -149,8 +149,70 @@ function pidExists(pid: number): boolean {
 }
 
 function startTimeMs(): number {
-  // process.uptime() is seconds since this process started; subtracting
-  // from Date.now() gives an approximate absolute start time — good enough
-  // to distinguish across a PID reuse.
   return Math.floor(Date.now() - process.uptime() * 1000);
+}
+
+function getProcessIdentity(pid: number): ProcessIdentity | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+
+  if (process.platform !== 'win32') {
+    return pid === process.pid ? { exe: process.execPath, startTimeMs: startTimeMs() } : null;
+  }
+
+  try {
+    const command = [
+      `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"`,
+      'if ($null -eq $p) { exit 2 }',
+      '$p | Select-Object ProcessId,ExecutablePath,CreationDate | ConvertTo-Json -Compress',
+    ].join('; ');
+    const raw = execFileSync(POWERSHELL_PATH, ['-NoProfile', '-NonInteractive', '-Command', command], {
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024,
+      timeout: 3000,
+      windowsHide: true,
+    }).trim();
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    const item = Array.isArray(parsed) ? parsed[0] : parsed;
+    const exe = typeof item?.ExecutablePath === 'string' ? item.ExecutablePath : '';
+    const parsedStart = parsePowerShellDate(item?.CreationDate);
+    if (!exe || parsedStart === null) return null;
+    return { exe, startTimeMs: parsedStart };
+  } catch {
+    return null;
+  }
+}
+
+function parsePowerShellDate(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return null;
+
+  const dotNetMatch = /\/Date\((-?\d+)\)\//.exec(value);
+  if (dotNetMatch) {
+    const timestamp = Number(dotNetMatch[1]);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  const dmtfMatch = /^(\d{14})\.(\d{6})([+-]\d{3})$/.exec(value);
+  if (dmtfMatch) {
+    const [, stamp, micros, offset] = dmtfMatch;
+    const utcMs = Date.UTC(
+      Number(stamp.slice(0, 4)),
+      Number(stamp.slice(4, 6)) - 1,
+      Number(stamp.slice(6, 8)),
+      Number(stamp.slice(8, 10)),
+      Number(stamp.slice(10, 12)),
+      Number(stamp.slice(12, 14)),
+      Number(micros.slice(0, 3)),
+    );
+    return utcMs - Number(offset) * 60_000;
+  }
+
+  const isoMs = Date.parse(value);
+  return Number.isFinite(isoMs) ? isoMs : null;
+}
+
+function normalizeExePath(value: string): string {
+  return path.normalize(value.replace(/^\\\\\?\\/, '')).toLowerCase();
 }

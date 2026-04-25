@@ -16,6 +16,9 @@ function forced(state: PresenceState): DetectionResult {
       app: state === 'app' || state === 'both' ? 1 : 0,
       unknown: 0,
     },
+    codex: null,
+    session: null,
+    usage: null,
   };
 }
 

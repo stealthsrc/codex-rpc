@@ -7,6 +7,7 @@ function mk(
   isoStart: string | null,
   codex: DetectionResult['codex'] = null,
   session: DetectionResult['session'] = null,
+  usage: DetectionResult['usage'] = null,
 ): DetectionResult {
   return {
     state,
@@ -14,6 +15,7 @@ function mk(
     processCounts: { cli: 0, app: 0, unknown: 0 },
     codex,
     session,
+    usage,
   };
 }
 
@@ -24,10 +26,14 @@ describe('buildPresence', () => {
 
   it('cli — falls back to static string when no codex config', () => {
     expect(buildPresence(mk('cli', '2026-04-18T10:00:00Z'))).toEqual({
+      name: 'Codex',
+      type: 0,
       details: 'Coding with Codex CLI',
       state: 'Terminal session active',
       largeImageKey: 'codex_logo',
       largeImageText: 'OpenAI Codex',
+      smallImageKey: 'cli_badge',
+      smallImageText: 'Codex CLI',
       startTimestamp: 1776506400,
       instance: false,
     });
@@ -105,9 +111,54 @@ describe('buildPresence', () => {
     expect(p?.startTimestamp).toBeUndefined();
   });
 
-  it('never emits smallImage fields', () => {
-    const p = buildPresence(mk('cli', '2026-04-18T10:00:00Z'));
-    expect(p).not.toHaveProperty('smallImageKey');
-    expect(p).not.toHaveProperty('smallImageText');
+  it('emits small image badge for the active mode', () => {
+    const p = buildPresence(mk('both', '2026-04-18T10:00:00Z'));
+    expect(p?.smallImageKey).toBe('combo_badge');
+    expect(p?.smallImageText).toBe('CLI + Desktop');
+  });
+
+  it('adds compact usage to state and image tooltip', () => {
+    const p = buildPresence(
+      mk(
+        'cli',
+        '2026-04-18T10:00:00Z',
+        { model: 'gpt-5.5', effort: 'high', serviceTier: null },
+        null,
+        {
+          limitId: 'codex',
+          primary: { usedPercent: 5, windowMinutes: 300, resetsAt: null },
+          secondary: { usedPercent: 19, windowMinutes: 10080, resetsAt: null },
+          creditsRemaining: 0,
+          planType: 'pro',
+          lastActivityMs: Date.now(),
+        },
+      ),
+    );
+    expect(p?.state).toBe('GPT-5.5 · High · 5h 95% · week 81%');
+    expect(p?.largeImageText).toBe('OpenAI Codex · 5h 95% · week 81%');
+  });
+
+  it('adds optional RPC buttons only in TV mode', () => {
+    const p = buildPresence(mk('cli', '2026-04-18T10:00:00Z'), [
+      { label: 'Open Codex', url: 'https://chatgpt.com/codex' },
+    ]);
+    expect(p?.buttons).toBeUndefined();
+
+    const tv = buildPresence(
+      mk('cli', '2026-04-18T10:00:00Z'),
+      [{ label: 'Open Codex', url: 'https://chatgpt.com/codex' }],
+      'watching',
+    );
+    expect(tv?.type).toBe(3);
+    expect(tv?.name).toBe('Codex');
+    expect(tv?.details).toBe('Watching Codex CLI');
+    expect(tv?.buttons).toEqual([
+      { label: 'Open Codex', url: 'https://chatgpt.com/codex' },
+    ]);
+  });
+
+  it('supports listening and competing activity types', () => {
+    expect(buildPresence(mk('cli', '2026-04-18T10:00:00Z'), [], 'listening')?.type).toBe(2);
+    expect(buildPresence(mk('cli', '2026-04-18T10:00:00Z'), [], 'competing')?.type).toBe(5);
   });
 });

@@ -13,6 +13,7 @@ function mk(
     processCounts: { cli: 1, app: 0, unknown: 0 },
     codex,
     session,
+    usage: null,
   };
 }
 

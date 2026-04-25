@@ -1,5 +1,12 @@
 import { formatEffort, formatModel } from '../detector/codex-config';
+import type { RpcActivityMode, RpcButtonConfig } from '../config';
+import type { CodexLimitSnapshot } from '../detector/codex-usage';
 import type { DetectionResult, PresenceState } from '../detector/state';
+
+const ACTIVITY_TYPE_PLAYING = 0;
+const ACTIVITY_TYPE_LISTENING = 2;
+const ACTIVITY_TYPE_WATCHING = 3;
+const ACTIVITY_TYPE_COMPETING = 5;
 
 /**
  * `config.toml` and session rollouts are user-local but still considered
@@ -22,16 +29,26 @@ function sanitizeField(raw: string | null | undefined, maxLen = MAX_FIELD_LENGTH
 }
 
 export interface PresencePayload {
+  name: string;
+  type: number;
   details: string;
   state: string;
   startTimestamp?: number;
   largeImageKey: string;
   largeImageText: string;
+  smallImageKey: string;
+  smallImageText: string;
+  buttons?: RpcButtonConfig[];
   instance?: boolean;
 }
 
 const LARGE_IMAGE_KEY = 'codex_logo';
 const LARGE_IMAGE_TEXT = 'OpenAI Codex';
+const SMALL_IMAGE: Record<Exclude<PresenceState, 'idle'>, { key: string; text: string }> = {
+  cli: { key: 'cli_badge', text: 'Codex CLI' },
+  app: { key: 'app_badge', text: 'Codex Desktop' },
+  both: { key: 'combo_badge', text: 'CLI + Desktop' },
+};
 
 const FALLBACK_STATE: Record<Exclude<PresenceState, 'idle'>, string> = {
   cli: 'Terminal session active',
@@ -48,24 +65,41 @@ const DETAILS: Record<Exclude<PresenceState, 'idle'>, string> = {
 // Discord's `details` field caps around 128 chars; repo names beyond this read poorly.
 const MAX_DETAILS_LENGTH = 96;
 
-export function buildPresence(result: DetectionResult): PresencePayload | null {
+export function buildPresence(
+  result: DetectionResult,
+  buttons: RpcButtonConfig[] = [],
+  mode: RpcActivityMode = 'playing',
+): PresencePayload | null {
   if (result.state === 'idle') return null;
   const payload: PresencePayload = {
-    details: buildDetails(result),
+    name: 'Codex',
+    type: activityType(mode),
+    details: buildDetails(result, mode),
     state: buildStateLine(result),
     largeImageKey: LARGE_IMAGE_KEY,
-    largeImageText: LARGE_IMAGE_TEXT,
+    largeImageText: buildLargeImageText(result),
+    smallImageKey: SMALL_IMAGE[result.state].key,
+    smallImageText: SMALL_IMAGE[result.state].text,
     instance: false,
   };
+  if (mode === 'watching' && buttons.length > 0) payload.buttons = buttons.slice(0, 2);
   if (result.startedAt) {
     payload.startTimestamp = Math.floor(result.startedAt.getTime() / 1000);
   }
   return payload;
 }
 
-function buildDetails(result: DetectionResult): string {
+function activityType(mode: RpcActivityMode): number {
+  if (mode === 'watching') return ACTIVITY_TYPE_WATCHING;
+  if (mode === 'listening') return ACTIVITY_TYPE_LISTENING;
+  if (mode === 'competing') return ACTIVITY_TYPE_COMPETING;
+  return ACTIVITY_TYPE_PLAYING;
+}
+
+function buildDetails(result: DetectionResult, mode: RpcActivityMode): string {
   if (result.state === 'idle') return '';
-  const base = DETAILS[result.state];
+  const base =
+    mode === 'watching' ? DETAILS[result.state].replace(/^Coding with/, 'Watching') : DETAILS[result.state];
   const repo = sanitizeField(result.session?.repoName, 32);
   if (!repo) return base;
   const suffix = ` · ${repo}`;
@@ -80,6 +114,30 @@ function buildStateLine(result: DetectionResult): string {
   const parts: string[] = [];
   if (model) parts.push(model);
   if (effort) parts.push(effort);
-  if (parts.length === 0) return FALLBACK_STATE[result.state];
-  return parts.join(' · ');
+  const base = parts.length > 0 ? parts.join(' · ') : FALLBACK_STATE[result.state];
+  const usage = compactUsageParts(result);
+  for (let count = usage.length; count >= 0; count--) {
+    const suffix = usage.slice(0, count).join(' · ');
+    const candidate = suffix ? `${base} · ${suffix}` : base;
+    if (candidate.length <= MAX_FIELD_LENGTH) return candidate;
+  }
+  return base.length <= MAX_FIELD_LENGTH ? base : base.slice(0, MAX_FIELD_LENGTH - 1) + '…';
+}
+
+function buildLargeImageText(result: DetectionResult): string {
+  const usage = compactUsageParts(result);
+  if (usage.length === 0) return LARGE_IMAGE_TEXT;
+  return sanitizeField(`${LARGE_IMAGE_TEXT} · ${usage.join(' · ')}`) ?? LARGE_IMAGE_TEXT;
+}
+
+function compactUsageParts(result: DetectionResult): string[] {
+  const primary = compactLimit('5h', result.usage?.primary ?? null);
+  const secondary = compactLimit('week', result.usage?.secondary ?? null);
+  return [primary, secondary].filter((p): p is string => Boolean(p));
+}
+
+function compactLimit(label: string, limit: CodexLimitSnapshot | null): string | null {
+  if (!limit) return null;
+  const remaining = Math.max(0, Math.round(100 - limit.usedPercent));
+  return `${label} ${remaining}%`;
 }
