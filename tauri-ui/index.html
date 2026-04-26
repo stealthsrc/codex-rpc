@@ -50,6 +50,25 @@
           <option value="competing">Competing</option>
         </select>
         <p id="hint">Buttons are sent only in Watching mode.</p>
+        <label>Usage</label>
+        <div class="switch-row">
+          <button type="button" id="usage-5h-toggle" class="toggle" aria-pressed="true">5h on</button>
+          <button type="button" id="usage-week-toggle" class="toggle" aria-pressed="true">Week on</button>
+        </div>
+        <p>Choose usage limits shown in status and Discord RPC.</p>
+      </section>
+
+      <section class="panel preview-panel">
+        <div class="legend">Preview</div>
+        <div class="rpc-preview">
+          <img class="preview-icon" src="./codex_logo.png" alt="" />
+          <div class="preview-copy">
+            <strong id="preview-activity">Playing Codex</strong>
+            <span id="preview-details">Coding with Codex CLI</span>
+            <span id="preview-state">Codex: Off</span>
+            <div id="preview-buttons" class="preview-buttons"></div>
+          </div>
+        </div>
       </section>
 
       <section class="panel presets">

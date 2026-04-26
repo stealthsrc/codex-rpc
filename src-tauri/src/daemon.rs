@@ -1,25 +1,41 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    mem::size_of,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use windows::{
+    core::PWSTR,
+    Win32::{
+        Foundation::{CloseHandle, FILETIME, HANDLE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    },
+};
 
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1494452015504293908";
 const SCAN_INTERVAL_MS: u64 = 5000;
+const UI_REFRESH_INTERVAL_MS: u64 = 500;
 const IDLE_GRACE_MS: u64 = 10_000;
-const PS_STDOUT_CAP_BYTES: usize = 2 * 1024 * 1024;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
@@ -35,6 +51,12 @@ struct RpcButton {
 struct RpcSettings {
     mode: String,
     buttons: Vec<RpcButton>,
+    #[serde(default, skip_serializing)]
+    show_usage: Option<bool>,
+    #[serde(default = "default_show_usage")]
+    show_primary_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_weekly_usage: bool,
 }
 
 impl Default for RpcSettings {
@@ -51,8 +73,15 @@ impl Default for RpcSettings {
                     url: "https://chatgpt.com/codex/settings/analytics".into(),
                 },
             ],
+            show_usage: None,
+            show_primary_usage: true,
+            show_weekly_usage: true,
         }
     }
+}
+
+fn default_show_usage() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +150,13 @@ struct ProcessSnapshot {
     creation_date_ms: Option<u64>,
 }
 
+#[cfg(windows)]
+struct ProcessEntry {
+    process_id: u32,
+    parent_process_id: u32,
+    name: String,
+}
+
 #[derive(Default)]
 struct StateMachine {
     last_non_idle: Option<DetectionResult>,
@@ -145,6 +181,8 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
     let mut last_key = String::new();
     let mut settings_modified = modified_ms(&settings_path);
     let mut settings = read_rpc_settings(&settings_path);
+    let mut result = detect(&mut machine, idle_grace_ms);
+    let mut last_scan_at = now_ms();
 
     while !stop.load(Ordering::SeqCst) {
         if modified_ms(&settings_path) != settings_modified {
@@ -160,16 +198,26 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             }
         }
 
-        let result = detect(&mut machine, idle_grace_ms);
+        let now = now_ms();
+        if now.saturating_sub(last_scan_at) >= scan_interval_ms {
+            result = detect(&mut machine, idle_grace_ms);
+            last_scan_at = now;
+        }
+
+        let mut display_result = result.clone();
+        filter_usage(&mut display_result, &settings);
         write_status(
             &status_path,
-            &format_status_line(&result, ipc.as_ref().and_then(|client| client.username.as_deref())),
+            &format_status_line(
+                &display_result,
+                ipc.as_ref().and_then(|client| client.username.as_deref()),
+            ),
         );
 
-        let key = presence_key(&result, &settings);
+        let key = presence_key(&display_result, &settings);
         if key != last_key {
             if let Some(client) = ipc.as_mut() {
-                let sent = match build_activity(&result, &settings) {
+                let sent = match build_activity(&display_result, &settings) {
                     Some(activity) => client.set_activity(activity),
                     None => client.clear_activity(),
                 };
@@ -183,7 +231,7 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             }
         }
 
-        sleep_polling(&stop, scan_interval_ms);
+        sleep_polling(&stop, UI_REFRESH_INTERVAL_MS);
     }
 
     if let Some(client) = ipc.as_mut() {
@@ -309,78 +357,117 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
     PresenceState::Idle
 }
 
+#[cfg(windows)]
 fn scan_codex_processes() -> Vec<ProcessSnapshot> {
-    const SCRIPT: &str = r#"$procs = Get-CimInstance Win32_Process; $index = @{}; foreach ($p in $procs) { $index[[int]$p.ProcessId] = $p.Name }; $procs | Where-Object { $_.Name -eq 'codex.exe' } | ForEach-Object { [PSCustomObject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; ExecutablePath = $_.ExecutablePath; CommandLine = $_.CommandLine; CreationDate = $_.CreationDate; ParentName = $index[[int]$_.ParentProcessId] } } | ConvertTo-Json -Compress -Depth 3"#;
-    let raw = match run_powershell(SCRIPT, Duration::from_secs(8)) {
-        Some(raw) => raw,
-        None => return Vec::new(),
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
+    scan_codex_processes_windows()
+}
 
-    let parsed: Value = match serde_json::from_str(trimmed) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
-    let entries = match parsed {
-        Value::Array(items) => items,
-        item => vec![item],
-    };
+#[cfg(not(windows))]
+fn scan_codex_processes() -> Vec<ProcessSnapshot> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn scan_codex_processes_windows() -> Vec<ProcessSnapshot> {
+    let entries = list_process_entries();
+    let names = entries
+        .iter()
+        .map(|entry| (entry.process_id, entry.name.clone()))
+        .collect::<HashMap<_, _>>();
 
     entries
         .into_iter()
-        .filter_map(|item| {
-            Some(ProcessSnapshot {
-                parent_name: item.get("ParentName").and_then(Value::as_str).map(str::to_string),
-                executable_path: item
-                    .get("ExecutablePath")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                creation_date_ms: parse_ps_date(item.get("CreationDate")?),
-            })
+        .filter(|entry| entry.name.eq_ignore_ascii_case("codex.exe"))
+        .map(|entry| ProcessSnapshot {
+            parent_name: names.get(&entry.parent_process_id).cloned(),
+            executable_path: query_process_path(entry.process_id),
+            creation_date_ms: query_process_creation_ms(entry.process_id),
         })
         .collect()
 }
 
-fn run_powershell(script: &str, timeout: Duration) -> Option<String> {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    let exe = Path::new(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
+#[cfg(windows)]
+fn list_process_entries() -> Vec<ProcessEntry> {
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return Vec::new();
+    };
 
-    let mut command = Command::new(exe);
-    command
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
+    let mut entries = Vec::new();
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
 
-    let mut child = command.spawn().ok()?;
-    let started = Instant::now();
-    loop {
-        if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
+    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+        loop {
+            entries.push(ProcessEntry {
+                process_id: entry.th32ProcessID,
+                parent_process_id: entry.th32ParentProcessID,
+                name: wide_to_string(&entry.szExeFile),
+            });
 
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().ok()?;
-                if !status.success() || output.stdout.len() > PS_STDOUT_CAP_BYTES {
-                    return None;
-                }
-                return String::from_utf8(output.stdout).ok();
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                break;
             }
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(_) => return None,
         }
     }
+
+    close_handle(snapshot);
+    entries
+}
+
+#[cfg(windows)]
+fn query_process_path(process_id: u32) -> Option<String> {
+    let handle = open_process_query(process_id)?;
+    let mut buffer = vec![0u16; 32_768];
+    let mut len = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    close_handle(handle);
+    result.ok()?;
+    Some(String::from_utf16_lossy(&buffer[..len as usize]))
+}
+
+#[cfg(windows)]
+fn query_process_creation_ms(process_id: u32) -> Option<u64> {
+    let handle = open_process_query(process_id)?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let result =
+        unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    close_handle(handle);
+    result.ok()?;
+    filetime_to_unix_ms(creation)
+}
+
+#[cfg(windows)]
+fn open_process_query(process_id: u32) -> Option<HANDLE> {
+    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()
+}
+
+#[cfg(windows)]
+fn close_handle(handle: HANDLE) {
+    let _ = unsafe { CloseHandle(handle) };
+}
+
+#[cfg(windows)]
+fn wide_to_string(value: &[u16]) -> String {
+    let len = value.iter().position(|ch| *ch == 0).unwrap_or(value.len());
+    String::from_utf16_lossy(&value[..len])
+}
+
+#[cfg(windows)]
+fn filetime_to_unix_ms(value: FILETIME) -> Option<u64> {
+    const WINDOWS_TO_UNIX_EPOCH_MS: u64 = 11_644_473_600_000;
+    let ticks = ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
+    let ms = ticks / 10_000;
+    ms.checked_sub(WINDOWS_TO_UNIX_EPOCH_MS)
 }
 
 fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Value> {
@@ -414,7 +501,8 @@ fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Va
         activity["timestamps"] = json!({ "start": started_at_ms / 1000 });
     }
     if mode == "watching" && !settings.buttons.is_empty() {
-        activity["buttons"] = serde_json::to_value(settings.buttons.iter().take(2).collect::<Vec<_>>()).ok()?;
+        activity["buttons"] =
+            serde_json::to_value(settings.buttons.iter().take(2).collect::<Vec<_>>()).ok()?;
     }
 
     Some(activity)
@@ -503,7 +591,10 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
             parts.push(format!("5h {}%", remaining_percent(primary.used_percent)));
         }
         if let Some(secondary) = &usage.secondary {
-            parts.push(format!("week {}%", remaining_percent(secondary.used_percent)));
+            parts.push(format!(
+                "week {}%",
+                remaining_percent(secondary.used_percent)
+            ));
         }
     }
     parts
@@ -543,10 +634,16 @@ fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
     let usage = usage?;
     let mut parts = Vec::new();
     if let Some(primary) = &usage.primary {
-        parts.push(format!("5h {}% left", remaining_percent(primary.used_percent)));
+        parts.push(format!(
+            "5h {}% left",
+            remaining_percent(primary.used_percent)
+        ));
     }
     if let Some(secondary) = &usage.secondary {
-        parts.push(format!("week {}% left", remaining_percent(secondary.used_percent)));
+        parts.push(format!(
+            "week {}% left",
+            remaining_percent(secondary.used_percent)
+        ));
     }
     if let Some(credits) = usage.credits_remaining {
         parts.push(format!("credits {}", credits.round()));
@@ -563,8 +660,13 @@ fn read_rpc_settings(path: &Path) -> RpcSettings {
         Ok(raw) => raw,
         Err(_) => return RpcSettings::default(),
     };
-    let mut settings = serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}'))
-        .unwrap_or_default();
+    let mut settings =
+        serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}')).unwrap_or_default();
+    if settings.show_usage == Some(false) {
+        settings.show_primary_usage = false;
+        settings.show_weekly_usage = false;
+    }
+    settings.show_usage = None;
     settings.mode = normalize_mode(&settings.mode);
     settings.buttons = settings
         .buttons
@@ -577,6 +679,17 @@ fn read_rpc_settings(path: &Path) -> RpcSettings {
         .take(2)
         .collect();
     settings
+}
+
+fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
+    if let Some(usage) = result.usage.as_mut() {
+        if !settings.show_primary_usage {
+            usage.primary = None;
+        }
+        if !settings.show_weekly_usage {
+            usage.secondary = None;
+        }
+    }
 }
 
 fn read_codex_config() -> Option<CodexConfig> {
@@ -678,7 +791,11 @@ fn find_latest_rollout_file(root: &Path, max_age_ms: u64) -> Option<(PathBuf, u6
             if now.saturating_sub(mtime) > max_age_ms {
                 continue;
             }
-            if best.as_ref().map(|(_, best_time)| mtime > *best_time).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|(_, best_time)| mtime > *best_time)
+                .unwrap_or(true)
+            {
                 *best = Some((path, mtime));
             }
         }
@@ -734,7 +851,8 @@ impl DiscordIpc {
             }
         }
         let mut client = Self {
-            file: file.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "discord ipc"))?,
+            file: file
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "discord ipc"))?,
             username: None,
             nonce: 0,
         };
@@ -780,7 +898,10 @@ impl DiscordIpc {
             let frame = self.read_frame()?;
             if frame.get("nonce").and_then(Value::as_str) == Some(nonce) {
                 if frame.get("evt").and_then(Value::as_str) == Some("ERROR") {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "discord rpc error"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "discord rpc error",
+                    ));
                 }
                 return Ok(());
             }
@@ -907,10 +1028,17 @@ fn format_model(model: &str) -> Option<String> {
                 .map(|(i, segment)| {
                     if i == 0 && segment.chars().all(|ch| ch.is_ascii_lowercase()) {
                         segment.to_ascii_uppercase()
-                    } else if segment.chars().next().map(char::is_lowercase).unwrap_or(false) {
+                    } else if segment
+                        .chars()
+                        .next()
+                        .map(char::is_lowercase)
+                        .unwrap_or(false)
+                    {
                         let mut chars = segment.chars();
                         match chars.next() {
-                            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                            Some(first) => {
+                                first.to_uppercase().collect::<String>() + chars.as_str()
+                            }
                             None => String::new(),
                         }
                     } else {
@@ -959,7 +1087,10 @@ fn truncate(value: String, max_len: usize) -> String {
     if value.chars().count() <= max_len {
         return value;
     }
-    let mut result = value.chars().take(max_len.saturating_sub(3)).collect::<String>();
+    let mut result = value
+        .chars()
+        .take(max_len.saturating_sub(3))
+        .collect::<String>();
     result.push_str("...");
     result
 }
@@ -984,14 +1115,28 @@ fn small_image_text(state: PresenceState) -> &'static str {
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
     format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
         result.state,
         result.started_at_ms,
-        result.codex.as_ref().and_then(|cfg| cfg.model.as_deref()).unwrap_or(""),
-        result.codex.as_ref().and_then(|cfg| cfg.effort.as_deref()).unwrap_or(""),
-        result.session.as_ref().map(|session| session.repo_name.as_str()).unwrap_or(""),
+        result
+            .codex
+            .as_ref()
+            .and_then(|cfg| cfg.model.as_deref())
+            .unwrap_or(""),
+        result
+            .codex
+            .as_ref()
+            .and_then(|cfg| cfg.effort.as_deref())
+            .unwrap_or(""),
+        result
+            .session
+            .as_ref()
+            .map(|session| session.repo_name.as_str())
+            .unwrap_or(""),
         format_usage(result.usage.as_ref()).unwrap_or_default(),
         settings.mode,
+        settings.show_primary_usage,
+        settings.show_weekly_usage,
         settings
             .buttons
             .iter()
@@ -999,13 +1144,6 @@ fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
             .collect::<Vec<_>>()
             .join(",")
     )
-}
-
-fn parse_ps_date(value: &Value) -> Option<u64> {
-    let raw = value.as_str()?;
-    let start = raw.find("/Date(")? + 6;
-    let end = raw[start..].find(")/")? + start;
-    raw[start..end].parse::<u64>().ok()
 }
 
 fn modified_ms(path: &Path) -> Option<u64> {

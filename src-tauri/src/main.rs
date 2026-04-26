@@ -12,7 +12,7 @@ use std::{
     },
 };
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
@@ -25,6 +25,16 @@ struct DaemonState {
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
+#[derive(Default)]
+struct TrayMenuState {
+    mode_watching: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    mode_playing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    mode_listening: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    show_5h: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    show_week: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RpcButton {
     label: String,
@@ -35,6 +45,12 @@ struct RpcButton {
 struct RpcSettings {
     mode: String,
     buttons: Vec<RpcButton>,
+    #[serde(default, skip_serializing)]
+    show_usage: Option<bool>,
+    #[serde(default = "default_show_usage")]
+    show_primary_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_weekly_usage: bool,
 }
 
 impl Default for RpcSettings {
@@ -51,8 +67,15 @@ impl Default for RpcSettings {
                     url: "https://chatgpt.com/codex/settings/analytics".into(),
                 },
             ],
+            show_usage: None,
+            show_primary_usage: true,
+            show_weekly_usage: true,
         }
     }
+}
+
+fn default_show_usage() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,7 +96,8 @@ fn load_settings() -> Result<RpcSettings, String> {
     let path = settings_path()?;
     match fs::read_to_string(&path) {
         Ok(raw) => Ok(normalize_settings(
-            serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}')).unwrap_or_default(),
+            serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}'))
+                .unwrap_or_default(),
         )),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(RpcSettings::default()),
         Err(err) => Err(err.to_string()),
@@ -81,14 +105,20 @@ fn load_settings() -> Result<RpcSettings, String> {
 }
 
 #[tauri::command]
-fn save_settings(settings: RpcSettings) -> Result<(), String> {
+fn save_settings(app: tauri::AppHandle, settings: RpcSettings) -> Result<(), String> {
+    let settings = normalize_settings(settings);
+    write_settings(&settings)?;
+    sync_tray_menu(&app, &settings);
+    Ok(())
+}
+
+fn write_settings(settings: &RpcSettings) -> Result<(), String> {
     let path = settings_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
 
-    let settings = normalize_settings(settings);
-    let json = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+    let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
     fs::write(path, json).map_err(|err| err.to_string())
 }
 
@@ -123,6 +153,7 @@ fn daemon_status(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, S
 fn main() {
     tauri::Builder::default()
         .manage(DaemonState::default())
+        .manage(TrayMenuState::default())
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
@@ -156,17 +187,142 @@ fn keep_window_in_tray(app: &mut tauri::App) {
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let settings = load_settings().unwrap_or_default();
     let show_item = MenuItem::with_id(app, "show", "Settings", true, None::<&str>)?;
+    let mode_watching_item = CheckMenuItem::with_id(
+        app,
+        "mode_watching",
+        "Mode: Watching",
+        true,
+        settings.mode == "watching",
+        None::<&str>,
+    )?;
+    let mode_playing_item = CheckMenuItem::with_id(
+        app,
+        "mode_playing",
+        "Mode: Playing",
+        true,
+        settings.mode == "playing",
+        None::<&str>,
+    )?;
+    let mode_listening_item = CheckMenuItem::with_id(
+        app,
+        "mode_listening",
+        "Mode: Listening",
+        true,
+        settings.mode == "listening",
+        None::<&str>,
+    )?;
+    let mode_competing_item = CheckMenuItem::with_id(
+        app,
+        "mode_competing",
+        "Mode: Competing",
+        true,
+        settings.mode == "competing",
+        None::<&str>,
+    )?;
+    let show_5h_item = CheckMenuItem::with_id(
+        app,
+        "show_5h",
+        "Show 5h usage",
+        true,
+        settings.show_primary_usage,
+        None::<&str>,
+    )?;
+    let show_week_item = CheckMenuItem::with_id(
+        app,
+        "show_week",
+        "Show week usage",
+        true,
+        settings.show_weekly_usage,
+        None::<&str>,
+    )?;
+    let separator_1 = PredefinedMenuItem::separator(app)?;
+    let separator_2 = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show_item,
+            &separator_1,
+            &mode_watching_item,
+            &mode_playing_item,
+            &mode_listening_item,
+            &mode_competing_item,
+            &show_5h_item,
+            &show_week_item,
+            &separator_2,
+            &quit_item,
+        ],
+    )?;
+
+    let tray_state = app.state::<TrayMenuState>();
+    *tray_state
+        .mode_watching
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(mode_watching_item.clone());
+    *tray_state
+        .mode_playing
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(mode_playing_item.clone());
+    *tray_state
+        .mode_listening
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(mode_listening_item.clone());
+    *tray_state
+        .mode_competing
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(mode_competing_item.clone());
+    *tray_state.show_5h.lock().expect("tray menu mutex poisoned") = Some(show_5h_item.clone());
+    *tray_state
+        .show_week
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(show_week_item.clone());
 
     TrayIconBuilder::new()
         .tooltip("Codex RPC")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => show_settings(app),
+            "mode_watching" => {
+                if let Ok(settings) = update_settings(|settings| settings.mode = "watching".into())
+                {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "mode_playing" => {
+                if let Ok(settings) = update_settings(|settings| settings.mode = "playing".into()) {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "mode_listening" => {
+                if let Ok(settings) = update_settings(|settings| settings.mode = "listening".into())
+                {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "mode_competing" => {
+                if let Ok(settings) = update_settings(|settings| settings.mode = "competing".into())
+                {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "show_5h" => {
+                if let Ok(settings) = update_settings(|settings| {
+                    settings.show_primary_usage = !settings.show_primary_usage
+                }) {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "show_week" => {
+                if let Ok(settings) = update_settings(|settings| {
+                    settings.show_weekly_usage = !settings.show_weekly_usage
+                }) {
+                    sync_tray_menu(app, &settings);
+                }
+            }
             "quit" => {
                 let state = app.state::<DaemonState>();
                 stop_daemon(&state);
@@ -187,6 +343,70 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
+}
+
+fn sync_tray_menu(app: &tauri::AppHandle, settings: &RpcSettings) {
+    let state = app.state::<TrayMenuState>();
+    let mode_watching = state
+        .mode_watching
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let mode_playing = state
+        .mode_playing
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let mode_listening = state
+        .mode_listening
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let mode_competing = state
+        .mode_competing
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let show_5h = state
+        .show_5h
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let show_week = state
+        .show_week
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+
+    if let Some(item) = mode_watching {
+        let _ = item.set_checked(settings.mode == "watching");
+    }
+    if let Some(item) = mode_playing {
+        let _ = item.set_checked(settings.mode == "playing");
+    }
+    if let Some(item) = mode_listening {
+        let _ = item.set_checked(settings.mode == "listening");
+    }
+    if let Some(item) = mode_competing {
+        let _ = item.set_checked(settings.mode == "competing");
+    }
+    if let Some(item) = show_5h {
+        let _ = item.set_checked(settings.show_primary_usage);
+    }
+    if let Some(item) = show_week {
+        let _ = item.set_checked(settings.show_weekly_usage);
+    }
+}
+
+fn update_settings<F>(mutator: F) -> Result<RpcSettings, String>
+where
+    F: FnOnce(&mut RpcSettings),
+{
+    let mut settings = load_settings()?;
+    mutator(&mut settings);
+    let settings = normalize_settings(settings);
+    write_settings(&settings)?;
+    Ok(settings)
 }
 
 fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {
@@ -217,10 +437,7 @@ fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {
             *running = false;
         }
     });
-    *state
-        .handle
-        .lock()
-        .expect("daemon handle mutex poisoned") = Some(handle);
+    *state.handle.lock().expect("daemon handle mutex poisoned") = Some(handle);
 }
 
 fn stop_daemon(state: &DaemonState) {
@@ -236,10 +453,7 @@ fn stop_daemon(state: &DaemonState) {
 }
 
 fn read_daemon_status(state: &DaemonState) -> DaemonStatus {
-    let running = *state
-        .running
-        .lock()
-        .expect("daemon state mutex poisoned");
+    let running = *state.running.lock().expect("daemon state mutex poisoned");
     let error = state
         .error
         .lock()
@@ -248,7 +462,11 @@ fn read_daemon_status(state: &DaemonState) -> DaemonStatus {
 
     DaemonStatus {
         running,
-        pid: if running { Some(std::process::id()) } else { None },
+        pid: if running {
+            Some(std::process::id())
+        } else {
+            None
+        },
         error,
     }
 }
@@ -270,6 +488,12 @@ fn show_settings(app: &tauri::AppHandle) {
 }
 
 fn normalize_settings(mut settings: RpcSettings) -> RpcSettings {
+    if settings.show_usage == Some(false) {
+        settings.show_primary_usage = false;
+        settings.show_weekly_usage = false;
+    }
+    settings.show_usage = None;
+
     settings.mode = match settings.mode.trim().to_ascii_lowercase().as_str() {
         "watching" | "tv" => "watching".into(),
         "listening" | "listen" => "listening".into(),

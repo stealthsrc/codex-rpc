@@ -314,12 +314,13 @@ dependencies = [
 
 [[package]]
 name = "codex_rich_presence_tray"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "windows",
 ]
 
 [[package]]
