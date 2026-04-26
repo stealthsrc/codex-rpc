@@ -87,8 +87,8 @@ async function stampBase(basePath) {
   await rcedit(basePath, {
     icon: iconPath,
     'version-string': {
-      ProductName: 'Codex Rich Presence',
-      FileDescription: pkgJson.description || 'Codex Rich Presence',
+      ProductName: 'Codex RPC',
+      FileDescription: pkgJson.description || 'Codex RPC',
       CompanyName: pkgJson.author || '',
       LegalCopyright: `(C) ${new Date().getFullYear()} ${pkgJson.author || ''}`,
       OriginalFilename: 'codex-rpc-daemon.exe',

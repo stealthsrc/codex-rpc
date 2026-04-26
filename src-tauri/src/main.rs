@@ -135,7 +135,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("failed to run Codex Rich Presence tray");
+        .expect("failed to run Codex RPC tray");
 }
 
 fn keep_window_in_tray(app: &mut tauri::App) {
@@ -156,7 +156,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
     TrayIconBuilder::new()
-        .tooltip("Codex Rich Presence")
+        .tooltip("Codex RPC")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .show_menu_on_left_click(false)

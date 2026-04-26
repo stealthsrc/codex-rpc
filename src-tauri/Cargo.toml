@@ -1,7 +1,7 @@
 [package]
 name = "codex_rich_presence_tray"
-version = "0.2.0"
-description = "Local tray UI for Codex Rich Presence"
+version = "0.2.1"
+description = "Codex RPC"
 authors = ["StealthyLabs"]
 license = "MIT"
 edition = "2021"

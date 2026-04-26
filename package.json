@@ -1,7 +1,7 @@
 {
   "name": "codex-rich-presence",
-  "version": "0.2.0",
-  "description": "Discord Rich Presence for OpenAI Codex (CLI + desktop app) on Windows",
+  "version": "0.2.1",
+  "description": "Codex RPC",
   "main": "dist/index.js",
   "bin": {
     "codex-rich-presence": "dist/index.js"
