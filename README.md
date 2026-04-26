@@ -1,173 +1,173 @@
 <p align="center">
-  <img src="assets/codex_logo.png" width="160" alt="Codex Rich Presence logo"/>
+  <img src="assets/codex_logo.png" width="140" alt="Codex RPC logo">
 </p>
 
-<h1 align="center">Codex Rich Presence</h1>
+<h1 align="center">Codex RPC</h1>
 
 <p align="center">
-  Discord Rich Presence for the OpenAI Codex ecosystem on Windows —
-  detects the <strong>Codex CLI</strong>, the <strong>Codex desktop app</strong>,
-  and reads your active model + reasoning effort from <code>~/.codex/config.toml</code>.
+  Windows system-tray Discord Rich Presence for OpenAI Codex.
+  Detects Codex CLI and Codex desktop, shows model/effort, and lets you control
+  Discord activity from a local Tauri settings window.
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#usage">Usage</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#development">Development</a>
+  <a href="#features">Features</a> |
+  <a href="#install">Install</a> |
+  <a href="#usage">Usage</a> |
+  <a href="#development">Development</a> |
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
-
----
 
 ## Features
 
-- **Detects both Codex surfaces at once.** CLI and desktop app both ship as `codex.exe`; this tool disambiguates them via executable path and parent process so your activity reads `Coding with Codex CLI`, `Using Codex`, or `Coding with Codex (CLI + Desktop)`.
-- **Live model + effort.** Reads `model`, `model_reasoning_effort`, and `service_tier` from your Codex config so Discord shows, e.g., `GPT-5.4 · Extra High`.
-- **Repo awareness.** Pulls the CWD of your most recent Codex session (rollout JSONL) and appends the repo name to the presence.
-- **System tray.** Hidden-window tray icon with live state, model, and a `Start with Windows` toggle. No console spam.
-- **Single instance, safely.** File-lock with PID + start-time identity so a forged lock can't DoS the daemon.
-- **Hardened.** `LOG_FILE` allowlisted to `%LOCALAPPDATA%`, PowerShell spawned via absolute `System32` path, output capped at 2 MB, RPC has a circuit breaker on auth failures.
-- **Self-contained EXE.** Single 65 MB Windows binary (Node 22 embedded) — no runtime install required for end users.
+- Native Windows tray app built with Tauri and Rust.
+- Single process app: no `codex-rpc-daemon.exe` sidecar.
+- Native process scan for `codex.exe` using Windows APIs, no PowerShell polling.
+- Detects Codex CLI vs Codex desktop even though both can be named `codex.exe`.
+- Discord RPC modes: Playing, Watching, Listening, Competing.
+- Discord buttons support in Watching mode.
+- Optional 5h and weekly usage display toggles.
+- Live autosave for settings.
+- Local preview of the Discord activity, including button preview.
+- Tray quick toggles for RPC mode and usage visibility.
+- Dark, System, and Light themes.
+- Resizable settings window.
 
 ## Install
 
-### Option A — prebuilt EXE (recommended)
+Download the latest release:
 
-1. Download `codex-rich-presence.exe` from the [Releases](../../releases) page.
-2. Double-click. That's it — a Codex icon appears in the system tray.
-3. *(Optional)* Right-click the tray icon → **Start with Windows** so it launches at logon.
+https://github.com/StealthyLabsHQ/codex-rpc/releases/latest
 
-### Option B — from source
+Recommended asset:
 
-```bash
-git clone https://github.com/StealthyLabsHQ/codex-rpc.git
-cd codex-rpc
-npm install
-npm run build
-npm start
-```
+- `Codex.RPC_0.3.1_x64-setup.exe`
 
-Requires Node.js 22+. The Discord Application ID is bundled (public identifier — override with `DISCORD_CLIENT_ID` env var if you've forked and run your own app).
+Portable asset:
+
+- `codex-rich-presence.exe`
+
+Run the app once. It starts in the system tray. Left-click the tray icon to open
+settings, or right-click for quick toggles and Quit.
 
 ## Usage
 
-### Tray mode (default)
+The settings window controls:
 
-Just launch the EXE. The tray icon shows:
+- RPC mode: Playing, Watching, Listening, Competing.
+- Two optional Discord buttons. Buttons are sent only in Watching mode.
+- 5h usage visibility.
+- Weekly usage visibility.
+- Theme.
 
-```
-Codex Rich Presence
-Codex: CLI/Desktop
-GPT-5.4 · Extra High
-──────────────
-☐ Start with Windows
-──────────────
-Quit
-```
+The tray menu controls:
 
-### CLI
+- Open settings.
+- Mode: Watching.
+- Mode: Playing.
+- Mode: Listening.
+- Mode: Competing.
+- Show 5h usage.
+- Show week usage.
+- Quit.
 
-```bash
-# Minimal status check — prints two lines then exits.
-codex-rich-presence.exe --status
-# →  Codex: Desktop
-# →  GPT-5.3-Codex · Extra High
+Settings are saved under:
 
-# Run the daemon without a tray (logs to stdout).
-codex-rich-presence.exe --no-tray
-```
-
-### Environment overrides
-
-All optional. Drop them in `.env` or set them in the shell.
-
-| Variable             | Default                                                    | Description |
-|----------------------|------------------------------------------------------------|-------------|
-| `DISCORD_CLIENT_ID`  | *(bundled)*                                                | Override the shipped Discord Application ID. |
-| `SCAN_INTERVAL_MS`   | `5000`                                                     | How often to poll for `codex.exe`. Minimum `2000`. |
-| `IDLE_GRACE_MS`      | `10000`                                                    | Hold the last non-idle state for this long when Codex disappears, to avoid flicker. |
-| `LOG_LEVEL`          | `info`                                                     | `trace` / `debug` / `info` / `warn` / `error`. |
-| `LOG_FILE`           | *(stdout only)*                                            | Must resolve under `%LOCALAPPDATA%\codex-rich-presence\logs\` (rejected otherwise). |
-| `FORCE_STATE`        | *(unset)*                                                  | `cli` / `app` / `both` / `idle` — skip detection, useful for testing. |
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  codex-rich-presence.exe  (Windows GUI subsystem, no console)     │
-│                                                                    │
-│  ┌─────────────┐   5 s    ┌────────────┐      ┌─────────────┐     │
-│  │ Process     │─────────▶│ Classifier │─────▶│  Detector   │     │
-│  │ scanner     │  WMI     │  (4 rules) │      │  state mach │     │
-│  │ (PowerShell)│          └────────────┘      └──────┬──────┘     │
-│  └─────────────┘                                     │            │
-│                                                      ▼            │
-│  ~/.codex/config.toml ──▶  model / effort      ┌───────────┐      │
-│  ~/.codex/sessions/*  ──▶  cwd (repo name)     │ Presence  │      │
-│                                                 │ builder   │      │
-│                                                 └─────┬─────┘      │
-│                                                       ▼            │
-│                                         ┌──────────────────┐       │
-│                                         │  Discord RPC     │       │
-│                                         │ @xhayper client  │       │
-│                                         └──────────────────┘       │
-│                                                                    │
-│  Status file ────▶  ┌──────────────────────────────────────────┐  │
-│                     │ Tray (hidden PowerShell NotifyIcon)       │  │
-│                     │  • state + model                          │  │
-│                     │  • Start with Windows toggle              │  │
-│                     │  • Quit                                   │  │
-│                     └──────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────┘
+```text
+%LOCALAPPDATA%\codex-rich-presence\rpc-buttons.json
 ```
 
-### CLI vs desktop disambiguation
+The live status file is:
 
-Four rules, applied in order:
+```text
+%LOCALAPPDATA%\codex-rich-presence\status.txt
+```
 
-1. **Canonical CLI path** — matches `\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\...\codex.exe`.
-2. **Any `@openai\codex` install path** — pnpm / yarn / bun / monorepo variants.
-3. **Parent is a shell / IDE terminal** — `cmd.exe`, `pwsh.exe`, `wt.exe`, `Code.exe`, `cursor.exe`, Alacritty, Hyper, ConEmu…
-4. **Fallback: desktop app.** Anything that didn't match 1–3 is treated as `codex.exe` from the desktop installer (typically `%LocalAppData%\Programs\Codex\codex.exe`).
+## Detection
 
-Unclassified processes are logged but never surfaced to Discord.
+Codex CLI and Codex desktop can both appear as `codex.exe`, so Codex RPC does
+not rely on process name alone.
+
+Detection uses:
+
+- executable path;
+- parent process name;
+- native Windows process creation time.
+
+CLI is detected when the path contains `\node_modules\@openai\codex\`, or when
+the parent is a terminal/editor shell such as `cmd.exe`, `pwsh.exe`, `wt.exe`,
+`Code.exe`, `cursor.exe`, `bash.exe`, Alacritty, Hyper, Tabby, or ConEmu.
+
+Everything else with a valid `codex.exe` path is treated as Codex desktop.
+
+## Codex Metadata
+
+Codex RPC reads local Codex files only:
+
+- `~\.codex\config.toml` for model and reasoning effort.
+- `~\.codex\sessions\**\rollout-*.jsonl` for repo name and usage snapshots.
+
+No Codex data is sent anywhere except the Discord Rich Presence payload through
+the local Discord IPC pipe.
+
+## Environment
+
+Optional overrides:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DISCORD_CLIENT_ID` | bundled app id | Override Discord Application ID. |
+| `SCAN_INTERVAL_MS` | `5000` | Codex process scan interval. Minimum `2000`. |
+| `IDLE_GRACE_MS` | `10000` | Keep last active state before clearing RPC. |
+
+Settings refresh every 500ms so UI changes apply quickly. Process scanning stays
+at 5s by default to avoid unnecessary polling.
 
 ## Development
 
+Requirements:
+
+- Node.js 22+
+- Rust/Cargo via rustup
+- Visual Studio 2022 Build Tools with MSVC v143 and Windows SDK
+- WebView2 Runtime
+
+Install dependencies:
+
 ```bash
 npm install
-npm run build           # tsc → dist/
-npm test                # vitest — 60+ unit tests
-npm start               # node dist/index.js (tray mode)
-npm run dist            # pkg + icon + version stamp → bin/codex-rich-presence.exe
 ```
 
-### Build pipeline
+Run checks:
 
-`npm run dist` does three non-obvious things in sequence:
+```bash
+npm run build
+npm test
+cd src-tauri
+cargo check
+```
 
-1. **rcedit-stamps the cached Node binary** (`~/.pkg-cache/v3.5/fetched-v22.22.2-win-x64`) with the icon, `ProductName`, `FileVersion`, copyright.
-2. **Patches `expected-shas.json`** in `@yao-pkg/pkg-fetch` so the hash check passes against the stamped binary (restored on exit — no pollution).
-3. **Flips the PE Subsystem byte** from `3` (Console) to `2` (Windows GUI) so double-clicking the EXE doesn't pop a console window.
+Build Windows app:
 
-See [`scripts/build-exe.js`](scripts/build-exe.js) for the full flow.
+```bash
+npm run tauri:build
+```
 
-### Tests
+Outputs:
 
-Unit tests cover the classifier, state machine, TOML parser, presence builder (including sanitation), session rollout reader, single-instance lock, and config loader. Run `npm test` or `npm run test:watch`.
+```text
+bin\codex-rich-presence.exe
+src-tauri\target\release\bundle\nsis\Codex RPC_0.3.1_x64-setup.exe
+```
 
-## Security notes
+## Security
 
-A security audit (`docs/security-audit.md` if included) informed:
-
-- `LOG_FILE` allowlist (rejects UNC, `\\.\pipe\`, `\\?\`, traversal).
-- Absolute PowerShell path + reduced environment for the scanner.
-- 2 MB stdout cap on PowerShell output with kill-on-overflow.
-- Lock file with `{pid, startTimeMs, exe}` identity (defeats PID spoof DoS).
-- Circuit breaker: 10 consecutive Discord RPC login failures → process exits.
-- Sanitation of model/effort/repo before they hit Discord (strip controls, bidi overrides, zero-width, NFC, length caps).
-- CI actions pinned to commit SHAs.
+- Button URLs are limited to `http://` and `https://`.
+- Discord IPC frame size is capped.
+- RPC text fields are sanitized before they reach Discord.
+- Process scanning uses native Windows APIs instead of shelling out.
+- The app only reads local Codex config/session files and local Discord IPC.
 
 ## License
 
-MIT © StealthyLabs
+MIT
