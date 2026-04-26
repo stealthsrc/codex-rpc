@@ -1,0 +1,1086 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+const DEFAULT_DISCORD_CLIENT_ID: &str = "1494452015504293908";
+const SCAN_INTERVAL_MS: u64 = 5000;
+const IDLE_GRACE_MS: u64 = 10_000;
+const PS_STDOUT_CAP_BYTES: usize = 2 * 1024 * 1024;
+const ACTIVITY_PLAYING: u8 = 0;
+const ACTIVITY_LISTENING: u8 = 2;
+const ACTIVITY_WATCHING: u8 = 3;
+const ACTIVITY_COMPETING: u8 = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RpcButton {
+    label: String,
+    url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RpcSettings {
+    mode: String,
+    buttons: Vec<RpcButton>,
+}
+
+impl Default for RpcSettings {
+    fn default() -> Self {
+        Self {
+            mode: "playing".into(),
+            buttons: vec![
+                RpcButton {
+                    label: "Open Codex".into(),
+                    url: "https://chatgpt.com/codex".into(),
+                },
+                RpcButton {
+                    label: "Usage".into(),
+                    url: "https://chatgpt.com/codex/settings/analytics".into(),
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresenceState {
+    Idle,
+    Cli,
+    App,
+    Both,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProcessCounts {
+    cli: usize,
+    app: usize,
+    unknown: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DetectionResult {
+    state: PresenceState,
+    started_at_ms: Option<u64>,
+    codex: Option<CodexConfig>,
+    session: Option<CodexSession>,
+    usage: Option<CodexUsage>,
+}
+
+impl Default for DetectionResult {
+    fn default() -> Self {
+        Self {
+            state: PresenceState::Idle,
+            started_at_ms: None,
+            codex: None,
+            session: None,
+            usage: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodexConfig {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexSession {
+    repo_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct LimitSnapshot {
+    used_percent: f64,
+}
+
+#[derive(Debug, Clone)]
+struct CodexUsage {
+    primary: Option<LimitSnapshot>,
+    secondary: Option<LimitSnapshot>,
+    credits_remaining: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessSnapshot {
+    parent_name: Option<String>,
+    executable_path: Option<String>,
+    creation_date_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct StateMachine {
+    last_non_idle: Option<DetectionResult>,
+    last_non_idle_at_ms: u64,
+    last_emitted: DetectionResult,
+    anchor_start_ms: Option<u64>,
+}
+
+pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: Option<PathBuf>) {
+    let settings_path = settings_path.unwrap_or_else(|| app_data_dir().join("rpc-buttons.json"));
+    let status_path = status_path.unwrap_or_else(|| app_data_dir().join("status.txt"));
+    let client_id = std::env::var("DISCORD_CLIENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_DISCORD_CLIENT_ID.to_string());
+    let scan_interval_ms = parse_env_u64("SCAN_INTERVAL_MS", SCAN_INTERVAL_MS, 2000);
+    let idle_grace_ms = parse_env_u64("IDLE_GRACE_MS", IDLE_GRACE_MS, 0);
+
+    let mut machine = StateMachine::default();
+    let mut ipc: Option<DiscordIpc> = None;
+    let mut last_key = String::new();
+    let mut settings_modified = modified_ms(&settings_path);
+    let mut settings = read_rpc_settings(&settings_path);
+
+    while !stop.load(Ordering::SeqCst) {
+        if modified_ms(&settings_path) != settings_modified {
+            settings_modified = modified_ms(&settings_path);
+            settings = read_rpc_settings(&settings_path);
+            last_key.clear();
+        }
+
+        if ipc.is_none() {
+            ipc = DiscordIpc::connect(&client_id).ok();
+            if ipc.is_some() {
+                last_key.clear();
+            }
+        }
+
+        let result = detect(&mut machine, idle_grace_ms);
+        write_status(
+            &status_path,
+            &format_status_line(&result, ipc.as_ref().and_then(|client| client.username.as_deref())),
+        );
+
+        let key = presence_key(&result, &settings);
+        if key != last_key {
+            if let Some(client) = ipc.as_mut() {
+                let sent = match build_activity(&result, &settings) {
+                    Some(activity) => client.set_activity(activity),
+                    None => client.clear_activity(),
+                };
+
+                if sent.is_ok() {
+                    last_key = key;
+                } else {
+                    ipc = None;
+                    last_key.clear();
+                }
+            }
+        }
+
+        sleep_polling(&stop, scan_interval_ms);
+    }
+
+    if let Some(client) = ipc.as_mut() {
+        let _ = client.clear_activity();
+    }
+    clear_status(&status_path);
+}
+
+fn detect(machine: &mut StateMachine, idle_grace_ms: u64) -> DetectionResult {
+    let mut counts = ProcessCounts::default();
+    let mut oldest: Option<u64> = None;
+
+    for process in scan_codex_processes() {
+        match classify_process(&process) {
+            PresenceState::Cli => {
+                counts.cli += 1;
+                oldest = min_option(oldest, process.creation_date_ms);
+            }
+            PresenceState::App => {
+                counts.app += 1;
+                oldest = min_option(oldest, process.creation_date_ms);
+            }
+            PresenceState::Idle => counts.unknown += 1,
+            PresenceState::Both => {}
+        }
+    }
+
+    let state = if counts.cli > 0 && counts.app > 0 {
+        PresenceState::Both
+    } else if counts.cli > 0 {
+        PresenceState::Cli
+    } else if counts.app > 0 {
+        PresenceState::App
+    } else {
+        PresenceState::Idle
+    };
+
+    let mut result = DetectionResult {
+        state,
+        started_at_ms: oldest,
+        codex: read_codex_config(),
+        session: None,
+        usage: read_codex_usage(),
+    };
+    if result.state != PresenceState::Idle {
+        result.session = read_codex_session();
+    }
+    machine.step(result, idle_grace_ms)
+}
+
+impl StateMachine {
+    fn step(&mut self, result: DetectionResult, idle_grace_ms: u64) -> DetectionResult {
+        let now = now_ms();
+        if result.state != PresenceState::Idle {
+            if self.anchor_start_ms.is_none() || self.last_emitted.state == PresenceState::Idle {
+                self.anchor_start_ms = result.started_at_ms;
+            } else {
+                self.anchor_start_ms = min_option(self.anchor_start_ms, result.started_at_ms);
+            }
+
+            let mut merged = result;
+            merged.started_at_ms = self.anchor_start_ms;
+            self.last_non_idle = Some(merged.clone());
+            self.last_non_idle_at_ms = now;
+            self.last_emitted = merged.clone();
+            return merged;
+        }
+
+        if let Some(last) = &self.last_non_idle {
+            if now.saturating_sub(self.last_non_idle_at_ms) < idle_grace_ms {
+                return last.clone();
+            }
+        }
+
+        self.last_non_idle = None;
+        self.anchor_start_ms = None;
+        self.last_emitted = result.clone();
+        result
+    }
+}
+
+fn classify_process(process: &ProcessSnapshot) -> PresenceState {
+    let exe = process
+        .executable_path
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let parent = process
+        .parent_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if exe.contains("\\node_modules\\@openai\\codex\\") {
+        return PresenceState::Cli;
+    }
+
+    let shell_parent = matches!(
+        parent.as_str(),
+        "cmd.exe"
+            | "powershell.exe"
+            | "pwsh.exe"
+            | "windowsterminal.exe"
+            | "wt.exe"
+            | "bash.exe"
+            | "code.exe"
+            | "cursor.exe"
+            | "conemu.exe"
+            | "conemu64.exe"
+            | "conemuc.exe"
+            | "conemuc64.exe"
+            | "alacritty.exe"
+            | "tabby.exe"
+            | "fluent-terminal.exe"
+            | "hyper.exe"
+    );
+    if shell_parent {
+        return PresenceState::Cli;
+    }
+    if !exe.is_empty() {
+        return PresenceState::App;
+    }
+    PresenceState::Idle
+}
+
+fn scan_codex_processes() -> Vec<ProcessSnapshot> {
+    const SCRIPT: &str = r#"$procs = Get-CimInstance Win32_Process; $index = @{}; foreach ($p in $procs) { $index[[int]$p.ProcessId] = $p.Name }; $procs | Where-Object { $_.Name -eq 'codex.exe' } | ForEach-Object { [PSCustomObject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; ExecutablePath = $_.ExecutablePath; CommandLine = $_.CommandLine; CreationDate = $_.CreationDate; ParentName = $index[[int]$_.ParentProcessId] } } | ConvertTo-Json -Compress -Depth 3"#;
+    let raw = match run_powershell(SCRIPT, Duration::from_secs(8)) {
+        Some(raw) => raw,
+        None => return Vec::new(),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let parsed: Value = match serde_json::from_str(trimmed) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let entries = match parsed {
+        Value::Array(items) => items,
+        item => vec![item],
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|item| {
+            Some(ProcessSnapshot {
+                parent_name: item.get("ParentName").and_then(Value::as_str).map(str::to_string),
+                executable_path: item
+                    .get("ExecutablePath")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                creation_date_ms: parse_ps_date(item.get("CreationDate")?),
+            })
+        })
+        .collect()
+}
+
+fn run_powershell(script: &str, timeout: Duration) -> Option<String> {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    let exe = Path::new(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+
+    let mut command = Command::new(exe);
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                if !status.success() || output.stdout.len() > PS_STDOUT_CAP_BYTES {
+                    return None;
+                }
+                return String::from_utf8(output.stdout).ok();
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Value> {
+    if result.state == PresenceState::Idle {
+        return None;
+    }
+    let mode = normalize_mode(&settings.mode);
+    let activity_type = match mode.as_str() {
+        "watching" => ACTIVITY_WATCHING,
+        "listening" => ACTIVITY_LISTENING,
+        "competing" => ACTIVITY_COMPETING,
+        _ => ACTIVITY_PLAYING,
+    };
+
+    let mut activity = json!({
+        "name": "Codex",
+        "type": activity_type,
+        "created_at": now_ms(),
+        "instance": false,
+        "details": build_details(result, &mode),
+        "state": build_state_line(result),
+        "assets": {
+            "large_image": "codex_logo",
+            "large_text": build_large_image_text(result),
+            "small_image": small_image_key(result.state),
+            "small_text": small_image_text(result.state),
+        },
+    });
+
+    if let Some(started_at_ms) = result.started_at_ms {
+        activity["timestamps"] = json!({ "start": started_at_ms / 1000 });
+    }
+    if mode == "watching" && !settings.buttons.is_empty() {
+        activity["buttons"] = serde_json::to_value(settings.buttons.iter().take(2).collect::<Vec<_>>()).ok()?;
+    }
+
+    Some(activity)
+}
+
+fn build_details(result: &DetectionResult, mode: &str) -> String {
+    let base = match (result.state, mode) {
+        (PresenceState::Cli, "watching") => "Watching Codex CLI",
+        (PresenceState::App, "watching") => "Watching Codex",
+        (PresenceState::Both, "watching") => "Watching Codex (CLI + Desktop)",
+        (PresenceState::Cli, _) => "Coding with Codex CLI",
+        (PresenceState::App, _) => "Using Codex",
+        (PresenceState::Both, _) => "Coding with Codex (CLI + Desktop)",
+        (PresenceState::Idle, _) => "",
+    };
+    if let Some(repo) = result
+        .session
+        .as_ref()
+        .and_then(|session| sanitize_field(Some(&session.repo_name), 32))
+    {
+        let candidate = format!("{base} - {repo}");
+        if candidate.len() <= 96 {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
+
+fn build_state_line(result: &DetectionResult) -> String {
+    let model = result
+        .codex
+        .as_ref()
+        .and_then(|cfg| cfg.model.as_deref())
+        .and_then(format_model);
+    let effort = result
+        .codex
+        .as_ref()
+        .and_then(|cfg| cfg.effort.as_deref())
+        .and_then(format_effort);
+    let mut parts = Vec::new();
+    if let Some(model) = model {
+        parts.push(model);
+    }
+    if let Some(effort) = effort {
+        parts.push(effort);
+    }
+    let base = if parts.is_empty() {
+        match result.state {
+            PresenceState::Cli => "Terminal session active".into(),
+            PresenceState::App => "Desktop session".into(),
+            PresenceState::Both => "CLI + Desktop".into(),
+            PresenceState::Idle => String::new(),
+        }
+    } else {
+        parts.join(" - ")
+    };
+
+    let usage = compact_usage_parts(result);
+    for count in (0..=usage.len()).rev() {
+        let suffix = usage[..count].join(" - ");
+        let candidate = if suffix.is_empty() {
+            base.clone()
+        } else {
+            format!("{base} - {suffix}")
+        };
+        if candidate.len() <= 48 {
+            return candidate;
+        }
+    }
+    truncate(base, 48)
+}
+
+fn build_large_image_text(result: &DetectionResult) -> String {
+    let usage = compact_usage_parts(result);
+    if usage.is_empty() {
+        "OpenAI Codex".into()
+    } else {
+        truncate(format!("OpenAI Codex - {}", usage.join(" - ")), 48)
+    }
+}
+
+fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(usage) = &result.usage {
+        if let Some(primary) = &usage.primary {
+            parts.push(format!("5h {}%", remaining_percent(primary.used_percent)));
+        }
+        if let Some(secondary) = &usage.secondary {
+            parts.push(format!("week {}%", remaining_percent(secondary.used_percent)));
+        }
+    }
+    parts
+}
+
+fn format_status_line(result: &DetectionResult, discord_user: Option<&str>) -> String {
+    let state = match result.state {
+        PresenceState::Both => "Codex: CLI/Desktop",
+        PresenceState::Cli => "Codex: CLI",
+        PresenceState::App => "Codex: Desktop",
+        PresenceState::Idle => "Codex: Off",
+    };
+    let model = result
+        .codex
+        .as_ref()
+        .and_then(|cfg| cfg.model.as_deref())
+        .and_then(format_model);
+    let effort = result
+        .codex
+        .as_ref()
+        .and_then(|cfg| cfg.effort.as_deref())
+        .and_then(format_effort);
+    let model_line = [model, effort]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" - ");
+    let usage_line = format_usage(result.usage.as_ref()).unwrap_or_default();
+    let discord = match discord_user {
+        Some(user) => format!("Discord: Connected ({user})"),
+        None => "Discord: RPC Disabled".into(),
+    };
+    format!("{state}|{model_line}|{usage_line}|{discord}")
+}
+
+fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
+    let usage = usage?;
+    let mut parts = Vec::new();
+    if let Some(primary) = &usage.primary {
+        parts.push(format!("5h {}% left", remaining_percent(primary.used_percent)));
+    }
+    if let Some(secondary) = &usage.secondary {
+        parts.push(format!("week {}% left", remaining_percent(secondary.used_percent)));
+    }
+    if let Some(credits) = usage.credits_remaining {
+        parts.push(format!("credits {}", credits.round()));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Usage: {}", parts.join(" / ")))
+    }
+}
+
+fn read_rpc_settings(path: &Path) -> RpcSettings {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(_) => return RpcSettings::default(),
+    };
+    let mut settings = serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}'))
+        .unwrap_or_default();
+    settings.mode = normalize_mode(&settings.mode);
+    settings.buttons = settings
+        .buttons
+        .into_iter()
+        .filter_map(|button| {
+            let label = clean_label(&button.label)?;
+            let url = clean_url(&button.url)?;
+            Some(RpcButton { label, url })
+        })
+        .take(2)
+        .collect();
+    settings
+}
+
+fn read_codex_config() -> Option<CodexConfig> {
+    let raw = fs::read_to_string(home_dir().join(".codex").join("config.toml")).ok()?;
+    let mut cfg = CodexConfig::default();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            break;
+        }
+        if let Some(value) = extract_toml_string(trimmed, "model") {
+            cfg.model = Some(value);
+        }
+        if let Some(value) = extract_toml_string(trimmed, "model_reasoning_effort") {
+            cfg.effort = Some(value);
+        }
+    }
+    Some(cfg)
+}
+
+fn read_codex_session() -> Option<CodexSession> {
+    let latest = find_latest_rollout_file(&sessions_dir(), 24 * 60 * 60 * 1000)?;
+    let first_line = read_first_line(&latest.0)?;
+    let obj: Value = serde_json::from_str(first_line.trim()).ok()?;
+    if obj.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let cwd = obj
+        .get("payload")
+        .and_then(|payload| payload.get("cwd"))
+        .and_then(Value::as_str)?;
+    Some(CodexSession {
+        repo_name: basename_safe(strip_windows_long_prefix(cwd)),
+    })
+}
+
+fn read_codex_usage() -> Option<CodexUsage> {
+    let latest = find_latest_rollout_file(&sessions_dir(), 24 * 60 * 60 * 1000)?;
+    let lines = read_tail_lines(&latest.0, 256 * 1024)?;
+    for line in lines.iter().rev() {
+        if let Some(usage) = parse_usage_line(line) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+fn parse_usage_line(line: &str) -> Option<CodexUsage> {
+    let obj: Value = serde_json::from_str(line).ok()?;
+    if obj.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = obj.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let limits = payload.get("rate_limits")?;
+    Some(CodexUsage {
+        primary: parse_limit(limits.get("primary")),
+        secondary: parse_limit(limits.get("secondary")),
+        credits_remaining: limits
+            .get("credits")
+            .and_then(|credits| credits.get("remaining").or_else(|| credits.get("balance")))
+            .and_then(Value::as_f64),
+    })
+}
+
+fn parse_limit(value: Option<&Value>) -> Option<LimitSnapshot> {
+    Some(LimitSnapshot {
+        used_percent: value?.get("used_percent")?.as_f64()?,
+    })
+}
+
+fn find_latest_rollout_file(root: &Path, max_age_ms: u64) -> Option<(PathBuf, u64)> {
+    fn walk(dir: &Path, now: u64, max_age_ms: u64, best: &mut Option<(PathBuf, u64)>) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                walk(&path, now, max_age_ms, best);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_type.is_file() || !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
+                continue;
+            }
+            let Some(mtime) = modified_ms(&path) else {
+                continue;
+            };
+            if now.saturating_sub(mtime) > max_age_ms {
+                continue;
+            }
+            if best.as_ref().map(|(_, best_time)| mtime > *best_time).unwrap_or(true) {
+                *best = Some((path, mtime));
+            }
+        }
+    }
+
+    let mut best = None;
+    walk(root, now_ms(), max_age_ms, &mut best);
+    best
+}
+
+fn read_first_line(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut buf = vec![0; 8192];
+    let len = file.read(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf[..len]);
+    Some(text.split('\n').next().unwrap_or_default().to_string())
+}
+
+fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
+    let mut file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let len = size.min(max_bytes);
+    let offset = size.saturating_sub(len);
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0; len as usize];
+    file.read_exact(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if offset > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    Some(lines)
+}
+
+struct DiscordIpc {
+    file: File,
+    username: Option<String>,
+    nonce: u64,
+}
+
+impl DiscordIpc {
+    fn connect(client_id: &str) -> std::io::Result<Self> {
+        let mut file = None;
+        for id in 0..10 {
+            let path = format!(r"\\?\pipe\discord-ipc-{id}");
+            if let Ok(candidate) = OpenOptions::new().read(true).write(true).open(path) {
+                file = Some(candidate);
+                break;
+            }
+        }
+        let mut client = Self {
+            file: file.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "discord ipc"))?,
+            username: None,
+            nonce: 0,
+        };
+        client.send_frame(0, &json!({ "v": 1, "client_id": client_id }))?;
+        let ready = client.read_frame()?;
+        client.username = ready
+            .get("data")
+            .and_then(|data| data.get("user"))
+            .and_then(|user| user.get("username"))
+            .and_then(Value::as_str)
+            .map(|value| sanitize_discord_user(value).unwrap_or_else(|| value.to_string()));
+        Ok(client)
+    }
+
+    fn set_activity(&mut self, activity: Value) -> std::io::Result<()> {
+        let nonce = self.next_nonce();
+        self.send_frame(
+            1,
+            &json!({
+                "cmd": "SET_ACTIVITY",
+                "args": { "pid": std::process::id(), "activity": activity },
+                "nonce": nonce,
+            }),
+        )?;
+        self.read_response(&nonce)
+    }
+
+    fn clear_activity(&mut self) -> std::io::Result<()> {
+        let nonce = self.next_nonce();
+        self.send_frame(
+            1,
+            &json!({
+                "cmd": "SET_ACTIVITY",
+                "args": { "pid": std::process::id() },
+                "nonce": nonce,
+            }),
+        )?;
+        self.read_response(&nonce)
+    }
+
+    fn read_response(&mut self, nonce: &str) -> std::io::Result<()> {
+        for _ in 0..4 {
+            let frame = self.read_frame()?;
+            if frame.get("nonce").and_then(Value::as_str) == Some(nonce) {
+                if frame.get("evt").and_then(Value::as_str) == Some("ERROR") {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "discord rpc error"));
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn next_nonce(&mut self) -> String {
+        self.nonce += 1;
+        format!("codex-rpc-{}-{}", std::process::id(), self.nonce)
+    }
+
+    fn send_frame(&mut self, opcode: u32, payload: &Value) -> std::io::Result<()> {
+        let data = serde_json::to_vec(payload)?;
+        self.file.write_all(&opcode.to_le_bytes())?;
+        self.file.write_all(&(data.len() as u32).to_le_bytes())?;
+        self.file.write_all(&data)?;
+        self.file.flush()
+    }
+
+    fn read_frame(&mut self) -> std::io::Result<Value> {
+        loop {
+            let mut header = [0u8; 8];
+            self.file.read_exact(&mut header)?;
+            let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            if len > 1024 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "discord ipc frame too large",
+                ));
+            }
+            let mut payload = vec![0u8; len];
+            self.file.read_exact(&mut payload)?;
+            let value: Value = serde_json::from_slice(&payload)?;
+            match opcode {
+                1 => return Ok(value),
+                2 => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "discord closed ipc",
+                    ));
+                }
+                3 => {
+                    let _ = self.send_frame(4, &value);
+                }
+                4 => {}
+                _ => {}
+            }
+        }
+    }
+}
+
+fn clean_label(value: &str) -> Option<String> {
+    let cleaned = value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.chars().take(32).collect())
+    }
+}
+
+fn clean_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.starts_with("http://") || value.starts_with("https://") {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+fn clean_status_line(line: &str) -> String {
+    line.replace(['\r', '\n'], " ").chars().take(256).collect()
+}
+
+fn write_status(path: &Path, line: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("txt.tmp");
+    if fs::write(&tmp, clean_status_line(line)).is_ok() {
+        let _ = fs::rename(tmp, path);
+    }
+}
+
+fn clear_status(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+fn normalize_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "watching" | "tv" => "watching",
+        "listening" | "listen" => "listening",
+        "competing" | "compete" => "competing",
+        _ => "playing",
+    }
+    .into()
+}
+
+fn extract_toml_string(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?.trim_start();
+    let value = rest.strip_prefix('=')?.trim();
+    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        return Some(value[1..value.len() - 1].replace("\\\"", "\""));
+    }
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        return Some(value[1..value.len() - 1].to_string());
+    }
+    Some(value.to_string())
+}
+
+fn format_model(model: &str) -> Option<String> {
+    sanitize_field(
+        Some(
+            &model
+                .split('-')
+                .enumerate()
+                .map(|(i, segment)| {
+                    if i == 0 && segment.chars().all(|ch| ch.is_ascii_lowercase()) {
+                        segment.to_ascii_uppercase()
+                    } else if segment.chars().next().map(char::is_lowercase).unwrap_or(false) {
+                        let mut chars = segment.chars();
+                        match chars.next() {
+                            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                            None => String::new(),
+                        }
+                    } else {
+                        segment.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("-"),
+        ),
+        24,
+    )
+}
+
+fn format_effort(effort: &str) -> Option<String> {
+    let label = match effort.to_ascii_lowercase().as_str() {
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" | "extra-high" => "Extra High",
+        _ => effort,
+    };
+    sanitize_field(Some(label), 16)
+}
+
+fn sanitize_field(raw: Option<&str>, max_len: usize) -> Option<String> {
+    let cleaned = raw?
+        .chars()
+        .filter(|ch| !ch.is_control() && !matches!(*ch as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2069 | 0xFEFF))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(truncate(cleaned, max_len))
+    }
+}
+
+fn sanitize_discord_user(raw: &str) -> Option<String> {
+    sanitize_field(Some(raw), 32)
+}
+
+fn truncate(value: String, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        return value;
+    }
+    let mut result = value.chars().take(max_len.saturating_sub(3)).collect::<String>();
+    result.push_str("...");
+    result
+}
+
+fn small_image_key(state: PresenceState) -> &'static str {
+    match state {
+        PresenceState::Cli => "cli_badge",
+        PresenceState::App => "app_badge",
+        PresenceState::Both => "combo_badge",
+        PresenceState::Idle => "codex_logo",
+    }
+}
+
+fn small_image_text(state: PresenceState) -> &'static str {
+    match state {
+        PresenceState::Cli => "Codex CLI",
+        PresenceState::App => "Codex Desktop",
+        PresenceState::Both => "CLI + Desktop",
+        PresenceState::Idle => "Codex",
+    }
+}
+
+fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
+    format!(
+        "{:?}|{:?}|{}|{}|{}|{}|{}|{}",
+        result.state,
+        result.started_at_ms,
+        result.codex.as_ref().and_then(|cfg| cfg.model.as_deref()).unwrap_or(""),
+        result.codex.as_ref().and_then(|cfg| cfg.effort.as_deref()).unwrap_or(""),
+        result.session.as_ref().map(|session| session.repo_name.as_str()).unwrap_or(""),
+        format_usage(result.usage.as_ref()).unwrap_or_default(),
+        settings.mode,
+        settings
+            .buttons
+            .iter()
+            .map(|button| format!("{}:{}", button.label, button.url))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn parse_ps_date(value: &Value) -> Option<u64> {
+    let raw = value.as_str()?;
+    let start = raw.find("/Date(")? + 6;
+    let end = raw[start..].find(")/")? + start;
+    raw[start..end].parse::<u64>().ok()
+}
+
+fn modified_ms(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn remaining_percent(used_percent: f64) -> i64 {
+    (100.0 - used_percent).max(0.0).round() as i64
+}
+
+fn parse_env_u64(name: &str, fallback: u64, min: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value >= min)
+        .unwrap_or(fallback)
+}
+
+fn sleep_polling(stop: &AtomicBool, total_ms: u64) {
+    let mut remaining = total_ms;
+    while remaining > 0 && !stop.load(Ordering::SeqCst) {
+        let chunk = remaining.min(200);
+        thread::sleep(Duration::from_millis(chunk));
+        remaining -= chunk;
+    }
+}
+
+fn sessions_dir() -> PathBuf {
+    home_dir().join(".codex").join("sessions")
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn app_data_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("codex-rich-presence")
+}
+
+fn strip_windows_long_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+fn basename_safe(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    trimmed
+        .rsplit(['\\', '/'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
+}

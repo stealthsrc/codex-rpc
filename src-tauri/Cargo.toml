@@ -1,6 +1,6 @@
 [package]
 name = "codex_rich_presence_tray"
-version = "0.2.1"
+version = "0.3.0"
 description = "Codex RPC"
 authors = ["StealthyLabs"]
 license = "MIT"
@@ -13,4 +13,3 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"

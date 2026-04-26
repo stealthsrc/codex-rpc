@@ -1,22 +1,28 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod daemon;
+
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 #[derive(Default)]
 struct DaemonState {
-    child: Mutex<Option<CommandChild>>,
+    running: Arc<Mutex<bool>>,
     error: Mutex<Option<String>>,
+    stop: Arc<AtomicBool>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +122,6 @@ fn daemon_status(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, S
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .manage(DaemonState::default())
         .invoke_handler(tauri::generate_handler![
             load_settings,
@@ -184,45 +189,57 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn start_daemon_inner(app: &tauri::AppHandle, state: &DaemonState) {
-    let mut child_slot = state.child.lock().expect("daemon child mutex poisoned");
-    if child_slot.is_some() {
+fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {
+    let mut running = state.running.lock().expect("daemon state mutex poisoned");
+    if *running {
         return;
     }
 
-    match app
-        .shell()
-        .sidecar("codex-rpc-daemon")
-        .and_then(|command| command.args(["--no-tray"]).spawn().map(|(_, child)| child))
+    state.stop.store(false, Ordering::SeqCst);
+    *state.error.lock().expect("daemon error mutex poisoned") = None;
+    *running = true;
+
+    let stop = Arc::clone(&state.stop);
+    let running_flag = Arc::clone(&state.running);
+    let status_path = status_path().ok();
+    let settings_path = settings_path().ok();
+    if let Some(handle) = state
+        .handle
+        .lock()
+        .expect("daemon handle mutex poisoned")
+        .take()
     {
-        Ok(child) => {
-            *state.error.lock().expect("daemon error mutex poisoned") = None;
-            *child_slot = Some(child);
-        }
-        Err(err) => {
-            *state.error.lock().expect("daemon error mutex poisoned") = Some(err.to_string());
-        }
+        let _ = handle.join();
     }
+    let handle = std::thread::spawn(move || {
+        daemon::run(stop, settings_path, status_path);
+        if let Ok(mut running) = running_flag.lock() {
+            *running = false;
+        }
+    });
+    *state
+        .handle
+        .lock()
+        .expect("daemon handle mutex poisoned") = Some(handle);
 }
 
 fn stop_daemon(state: &DaemonState) {
-    if let Some(child) = state
-        .child
+    state.stop.store(true, Ordering::SeqCst);
+    if let Some(handle) = state
+        .handle
         .lock()
-        .expect("daemon child mutex poisoned")
+        .expect("daemon handle mutex poisoned")
         .take()
     {
-        let _ = child.kill();
+        let _ = handle.join();
     }
 }
 
 fn read_daemon_status(state: &DaemonState) -> DaemonStatus {
-    let pid = state
-        .child
+    let running = *state
+        .running
         .lock()
-        .expect("daemon child mutex poisoned")
-        .as_ref()
-        .map(CommandChild::pid);
+        .expect("daemon state mutex poisoned");
     let error = state
         .error
         .lock()
@@ -230,8 +247,8 @@ fn read_daemon_status(state: &DaemonState) -> DaemonStatus {
         .clone();
 
     DaemonStatus {
-        running: pid.is_some(),
-        pid,
+        running,
+        pid: if running { Some(std::process::id()) } else { None },
         error,
     }
 }

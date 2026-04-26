@@ -1,6 +1,6 @@
 {
   "name": "codex-rich-presence",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Codex RPC",
   "main": "dist/index.js",
   "bin": {
@@ -13,9 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "tauri:sidecar": "node scripts/prepare-tauri-sidecar.js",
-    "tauri:dev": "npm run dist && npm run tauri:sidecar && tauri dev",
-    "tauri:build": "npm run dist && npm run tauri:sidecar && tauri build && node scripts/export-tauri-exe.js",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build && node scripts/export-tauri-exe.js",
     "pkg": "pkg . --targets node22-win-x64 --output bin/codex-rpc-daemon.exe",
     "dist": "node scripts/build-exe.js"
   },
