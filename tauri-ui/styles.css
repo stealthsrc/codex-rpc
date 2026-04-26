@@ -1,39 +1,40 @@
 :root {
   color-scheme: dark;
-  --bg: #000;
-  --surface: #05070b;
-  --panel: #0a0f17;
-  --input: #02050a;
-  --line: #27313f;
-  --muted: #9aa7b8;
-  --text: #edf5ff;
-  --accent: #c7d2e0;
-  --primary: #2563eb;
+  --bg: radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(236, 72, 153, 0.15) 0px, transparent 50%), radial-gradient(at 100% 100%, rgba(14, 165, 233, 0.15) 0px, transparent 50%), radial-gradient(at 0% 100%, rgba(16, 185, 129, 0.15) 0px, transparent 50%), #0b0f19;
+  --surface: rgba(15, 23, 42, 0.3);
+  --panel: rgba(255, 255, 255, 0.03);
+  --input: rgba(0, 0, 0, 0.25);
+  --line: rgba(255, 255, 255, 0.08);
+  --muted: #94a3b8;
+  --text: #f8fafc;
+  --accent: #e2e8f0;
+  --primary: rgba(59, 130, 246, 0.85);
   --primary-text: #fff;
-  --button: #0b111a;
-  --button-hover: #151d29;
-  --status-bg: rgba(148, 163, 184, 0.1);
-  --shadow: none;
-  --focus: rgba(148, 163, 184, 0.18);
+  --button: rgba(255, 255, 255, 0.04);
+  --button-hover: rgba(255, 255, 255, 0.08);
+  --status-bg: rgba(255, 255, 255, 0.05);
+  --shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.25);
+  --focus: rgba(59, 130, 246, 0.4);
+  --glass-blur: blur(16px);
 }
 
 body[data-theme="light"] {
   color-scheme: light;
-  --bg: #e9eff7;
-  --surface: #f7faff;
-  --panel: #ffffff;
-  --input: #ffffff;
-  --line: #d2dae6;
-  --muted: #52657f;
+  --bg: radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(236, 72, 153, 0.15) 0px, transparent 50%), radial-gradient(at 100% 100%, rgba(14, 165, 233, 0.15) 0px, transparent 50%), radial-gradient(at 0% 100%, rgba(16, 185, 129, 0.15) 0px, transparent 50%), #f8fafc;
+  --surface: rgba(255, 255, 255, 0.4);
+  --panel: rgba(255, 255, 255, 0.5);
+  --input: rgba(255, 255, 255, 0.6);
+  --line: rgba(255, 255, 255, 0.4);
+  --muted: #475569;
   --text: #0f172a;
-  --accent: #334155;
-  --primary: #2563eb;
+  --accent: #1e293b;
+  --primary: rgba(37, 99, 235, 0.9);
   --primary-text: #fff;
-  --button: #f8fbff;
-  --button-hover: #eef2f7;
-  --status-bg: #f1f5f9;
-  --shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
-  --focus: rgba(37, 99, 235, 0.16);
+  --button: rgba(255, 255, 255, 0.5);
+  --button-hover: rgba(255, 255, 255, 0.8);
+  --status-bg: rgba(255, 255, 255, 0.5);
+  --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+  --focus: rgba(37, 99, 235, 0.2);
 }
 
 * {
@@ -45,6 +46,7 @@ body {
   height: 100vh;
   overflow: auto;
   background: var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font: 13px/1.4 "Segoe UI", Arial, sans-serif;
 }
@@ -61,6 +63,8 @@ select {
   padding: 18px 20px;
   background: var(--surface);
   overflow: visible;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .topbar {
@@ -95,12 +99,14 @@ h1 {
   max-width: 100%;
   margin: 0;
   padding: 4px 8px;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--status-bg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .panel {
@@ -108,9 +114,11 @@ h1 {
   margin: 12px 0;
   padding: 22px 14px 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--panel);
   box-shadow: var(--shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .legend {
@@ -119,8 +127,12 @@ h1 {
   left: 12px;
   padding: 0 8px;
   background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
   color: var(--accent);
   font-weight: 650;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .grid {
@@ -141,17 +153,24 @@ select {
   width: 100%;
   min-height: 30px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--input);
   color: var(--text);
   outline: none;
   padding: 5px 9px;
+  transition: all 0.2s ease;
 }
 
 input:focus,
 select:focus {
-  border-color: #64748b;
+  border-color: rgba(59, 130, 246, 0.5);
   box-shadow: 0 0 0 3px var(--focus);
+  background: rgba(0, 0, 0, 0.4);
+}
+
+body[data-theme="light"] input:focus,
+body[data-theme="light"] select:focus {
+  background: rgba(255, 255, 255, 0.9);
 }
 
 input:disabled,
@@ -172,8 +191,9 @@ button:disabled {
 
 .toggle.active {
   background: var(--primary);
-  border-color: var(--primary);
+  border-color: transparent;
   color: var(--primary-text);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
 }
 
 .switch-row {
@@ -202,6 +222,7 @@ button:disabled {
   width: 64px;
   height: 64px;
   border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .preview-copy {
@@ -232,7 +253,7 @@ button:disabled {
   max-width: 150px;
   padding: 5px 10px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--button);
   color: var(--text);
   text-align: center;
@@ -251,22 +272,36 @@ button {
   min-width: 110px;
   min-height: 31px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--button);
   color: var(--text);
   cursor: pointer;
-  box-shadow: var(--shadow);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+  transition: all 0.2s ease;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 button:hover:not(:disabled) {
-  border-color: #64748b;
+  border-color: rgba(255, 255, 255, 0.2);
   background: var(--button-hover);
+  transform: translateY(-1px);
+}
+
+body[data-theme="light"] button:hover:not(:disabled) {
+  border-color: rgba(0, 0, 0, 0.1);
 }
 
 .primary {
   background: var(--primary);
-  border-color: var(--primary);
+  border-color: transparent;
   color: var(--primary-text);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+.primary:hover:not(:disabled) {
+  background: rgba(37, 99, 235, 1);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
 }
 
 .ghost {
@@ -277,9 +312,12 @@ button:hover:not(:disabled) {
   display: flex;
   gap: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
-  box-shadow: var(--shadow);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  background: var(--panel);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .theme-switch button {
@@ -287,6 +325,9 @@ button:hover:not(:disabled) {
   border: 0;
   border-right: 1px solid var(--line);
   border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .theme-switch button:last-child {

@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.2] - 2026-04-26
+
+### Changed
+
+- Refreshed settings UI with glass panels, softer backgrounds, and stronger focus states.
+
 ## [0.3.1] - 2026-04-26
 
 ### Added

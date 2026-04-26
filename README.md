@@ -41,7 +41,7 @@ https://github.com/StealthyLabsHQ/codex-rpc/releases/latest
 
 Recommended asset:
 
-- `Codex.RPC_0.3.1_x64-setup.exe`
+- `Codex RPC_0.3.2_x64-setup.exe`
 
 Portable asset:
 
@@ -157,7 +157,7 @@ Outputs:
 
 ```text
 bin\codex-rich-presence.exe
-src-tauri\target\release\bundle\nsis\Codex RPC_0.3.1_x64-setup.exe
+src-tauri\target\release\bundle\nsis\Codex RPC_0.3.2_x64-setup.exe
 ```
 
 ## Security
