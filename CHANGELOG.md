@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.3] - 2026-04-27
+
+### Added
+
+- Start on Windows toggle in the tray menu.
+
 ## [0.3.2] - 2026-04-26
 
 ### Changed

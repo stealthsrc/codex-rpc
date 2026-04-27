@@ -17,6 +17,9 @@ use tauri::{
     Manager, WindowEvent,
 };
 
+const RUN_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_REGISTRY_NAME: &str = "CodexRichPresence";
+
 #[derive(Default)]
 struct DaemonState {
     running: Arc<Mutex<bool>>,
@@ -33,6 +36,7 @@ struct TrayMenuState {
     mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     show_5h: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     show_week: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    startup: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +241,14 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         settings.show_weekly_usage,
         None::<&str>,
     )?;
+    let startup_item = CheckMenuItem::with_id(
+        app,
+        "startup",
+        "Start on Windows",
+        true,
+        startup_enabled(),
+        None::<&str>,
+    )?;
     let separator_1 = PredefinedMenuItem::separator(app)?;
     let separator_2 = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -251,6 +263,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             &mode_competing_item,
             &show_5h_item,
             &show_week_item,
+            &startup_item,
             &separator_2,
             &quit_item,
         ],
@@ -278,6 +291,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_week
         .lock()
         .expect("tray menu mutex poisoned") = Some(show_week_item.clone());
+    *tray_state.startup.lock().expect("tray menu mutex poisoned") = Some(startup_item.clone());
 
     TrayIconBuilder::new()
         .tooltip("Codex RPC")
@@ -322,6 +336,10 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 }) {
                     sync_tray_menu(app, &settings);
                 }
+            }
+            "startup" => {
+                let _ = set_startup_enabled(!startup_enabled());
+                sync_startup_menu(app);
             }
             "quit" => {
                 let state = app.state::<DaemonState>();
@@ -396,6 +414,76 @@ fn sync_tray_menu(app: &tauri::AppHandle, settings: &RpcSettings) {
     if let Some(item) = show_week {
         let _ = item.set_checked(settings.show_weekly_usage);
     }
+    sync_startup_menu(app);
+}
+
+fn sync_startup_menu(app: &tauri::AppHandle) {
+    let startup = app
+        .state::<TrayMenuState>()
+        .startup
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    if let Some(item) = startup {
+        let _ = item.set_checked(startup_enabled());
+    }
+}
+
+#[cfg(windows)]
+fn startup_enabled() -> bool {
+    reg_command()
+        .args(["query", RUN_REGISTRY_KEY, "/v", RUN_REGISTRY_NAME])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn startup_enabled() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn set_startup_enabled(enabled: bool) -> Result<(), String> {
+    let mut command = reg_command();
+    if enabled {
+        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        let startup_command = format!("\"{}\"", exe.to_string_lossy());
+        command.args([
+            "add",
+            RUN_REGISTRY_KEY,
+            "/v",
+            RUN_REGISTRY_NAME,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &startup_command,
+            "/f",
+        ]);
+    } else {
+        command.args(["delete", RUN_REGISTRY_KEY, "/v", RUN_REGISTRY_NAME, "/f"]);
+    }
+
+    let status = command.status().map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("reg.exe exited with {status}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn set_startup_enabled(_enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reg_command() -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = std::process::Command::new("reg");
+    command.creation_flags(0x08000000);
+    command
 }
 
 fn update_settings<F>(mutator: F) -> Result<RpcSettings, String>
