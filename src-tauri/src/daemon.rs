@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
-    mem::size_of,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,6 +12,11 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 #[cfg(windows)]
 use windows::{
@@ -324,18 +328,22 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let exe_unix = exe.replace('\\', "/");
     let parent = process
         .parent_name
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let parent_name = command_basename(&parent);
 
-    if exe.contains("\\node_modules\\@openai\\codex\\") {
+    if exe.contains("\\node_modules\\@openai\\codex\\")
+        || exe_unix.contains("/node_modules/@openai/codex/")
+    {
         return PresenceState::Cli;
     }
 
     let shell_parent = matches!(
-        parent.as_str(),
+        parent_name.as_str(),
         "cmd.exe"
             | "powershell.exe"
             | "pwsh.exe"
@@ -352,7 +360,25 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
             | "tabby.exe"
             | "fluent-terminal.exe"
             | "hyper.exe"
-    );
+            | "zsh"
+            | "bash"
+            | "sh"
+            | "fish"
+            | "nu"
+            | "terminal"
+            | "iterm2"
+            | "warp"
+            | "ghostty"
+            | "alacritty"
+            | "tabby"
+            | "hyper"
+            | "code"
+            | "cursor"
+    ) || parent.contains(".app/contents/macos/code")
+        || parent.contains(".app/contents/macos/cursor")
+        || parent.contains(".app/contents/macos/terminal")
+        || parent.contains(".app/contents/macos/iterm2");
+
     if shell_parent {
         return PresenceState::Cli;
     }
@@ -367,7 +393,12 @@ fn scan_codex_processes() -> Vec<ProcessSnapshot> {
     scan_codex_processes_windows()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn scan_codex_processes() -> Vec<ProcessSnapshot> {
+    scan_codex_processes_macos()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn scan_codex_processes() -> Vec<ProcessSnapshot> {
     Vec::new()
 }
@@ -399,7 +430,7 @@ fn list_process_entries() -> Vec<ProcessEntry> {
 
     let mut entries = Vec::new();
     let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
     if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
         loop {
@@ -473,6 +504,101 @@ fn filetime_to_unix_ms(value: FILETIME) -> Option<u64> {
     let ticks = ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
     let ms = ticks / 10_000;
     ms.checked_sub(WINDOWS_TO_UNIX_EPOCH_MS)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct MacProcessEntry {
+    process_id: u32,
+    parent_process_id: u32,
+    command: String,
+}
+
+#[cfg(target_os = "macos")]
+fn scan_codex_processes_macos() -> Vec<ProcessSnapshot> {
+    let entries = list_macos_process_entries();
+    let commands = entries
+        .iter()
+        .map(|entry| (entry.process_id, entry.command.clone()))
+        .collect::<HashMap<_, _>>();
+
+    entries
+        .into_iter()
+        .filter(|entry| is_macos_codex_candidate(&entry.command))
+        .map(|entry| ProcessSnapshot {
+            parent_name: commands.get(&entry.parent_process_id).cloned(),
+            executable_path: Some(entry.command),
+            creation_date_ms: None,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn list_macos_process_entries() -> Vec<MacProcessEntry> {
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_macos_process_line)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_process_line(line: &str) -> Option<MacProcessEntry> {
+    let (process_id, rest) = split_process_field(line)?;
+    let (parent_process_id, rest) = split_process_field(rest)?;
+    let process_id = process_id.parse().ok()?;
+    let parent_process_id = parent_process_id.parse().ok()?;
+    let command = rest.trim_start().to_string();
+    if command.is_empty() {
+        return None;
+    }
+    Some(MacProcessEntry {
+        process_id,
+        parent_process_id,
+        command,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn split_process_field(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    Some((&input[..end], &input[end..]))
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_codex_candidate(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    if command.contains("codex-rich-presence") {
+        return false;
+    }
+    command.contains("/node_modules/@openai/codex/")
+        || command.contains("/@openai/codex/")
+        || command.contains(".app/contents/macos/codex")
+        || command_basename(&command) == "codex"
+}
+
+fn command_basename(command: &str) -> String {
+    let executable = command.split_whitespace().next().unwrap_or(command);
+    executable
+        .trim_matches('"')
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(executable)
+        .to_ascii_lowercase()
 }
 
 fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Value> {
@@ -840,24 +966,53 @@ fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
 }
 
 struct DiscordIpc {
-    file: File,
+    connection: IpcConnection,
     username: Option<String>,
     nonce: u64,
 }
 
+enum IpcConnection {
+    #[cfg(windows)]
+    File(File),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl Read for IpcConnection {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => file.read(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for IpcConnection {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => file.write(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => file.flush(),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.flush(),
+        }
+    }
+}
+
 impl DiscordIpc {
     fn connect(client_id: &str) -> std::io::Result<Self> {
-        let mut file = None;
-        for id in 0..10 {
-            let path = format!(r"\\?\pipe\discord-ipc-{id}");
-            if let Ok(candidate) = OpenOptions::new().read(true).write(true).open(path) {
-                file = Some(candidate);
-                break;
-            }
-        }
         let mut client = Self {
-            file: file
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "discord ipc"))?,
+            connection: connect_discord_ipc()?,
             username: None,
             nonce: 0,
         };
@@ -921,16 +1076,17 @@ impl DiscordIpc {
 
     fn send_frame(&mut self, opcode: u32, payload: &Value) -> std::io::Result<()> {
         let data = serde_json::to_vec(payload)?;
-        self.file.write_all(&opcode.to_le_bytes())?;
-        self.file.write_all(&(data.len() as u32).to_le_bytes())?;
-        self.file.write_all(&data)?;
-        self.file.flush()
+        self.connection.write_all(&opcode.to_le_bytes())?;
+        self.connection
+            .write_all(&(data.len() as u32).to_le_bytes())?;
+        self.connection.write_all(&data)?;
+        self.connection.flush()
     }
 
     fn read_frame(&mut self) -> std::io::Result<Value> {
         loop {
             let mut header = [0u8; 8];
-            self.file.read_exact(&mut header)?;
+            self.connection.read_exact(&mut header)?;
             let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
             let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
             if len > 1024 * 1024 {
@@ -940,7 +1096,7 @@ impl DiscordIpc {
                 ));
             }
             let mut payload = vec![0u8; len];
-            self.file.read_exact(&mut payload)?;
+            self.connection.read_exact(&mut payload)?;
             let value: Value = serde_json::from_slice(&payload)?;
             match opcode {
                 1 => return Ok(value),
@@ -957,6 +1113,57 @@ impl DiscordIpc {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(windows)]
+fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
+    for id in 0..10 {
+        let path = format!(r"\\?\pipe\discord-ipc-{id}");
+        if let Ok(candidate) = OpenOptions::new().read(true).write(true).open(path) {
+            return Ok(IpcConnection::File(candidate));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "discord ipc",
+    ))
+}
+
+#[cfg(unix)]
+fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
+    for base in discord_ipc_roots() {
+        for id in 0..10 {
+            let path = base.join(format!("discord-ipc-{id}"));
+            if let Ok(stream) = UnixStream::connect(path) {
+                return Ok(IpcConnection::Unix(stream));
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "discord ipc",
+    ))
+}
+
+#[cfg(unix)]
+fn discord_ipc_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for name in ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"] {
+        if let Some(path) = std::env::var_os(name).map(PathBuf::from) {
+            push_unique_path(&mut roots, path);
+        }
+    }
+    for path in ["/tmp", "/var/tmp", "/usr/tmp"] {
+        push_unique_path(&mut roots, PathBuf::from(path));
+    }
+    roots
+}
+
+#[cfg(unix)]
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
     }
 }
 
@@ -1204,15 +1411,22 @@ fn sessions_dir() -> PathBuf {
 
 fn home_dir() -> PathBuf {
     std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn app_data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("codex-rich-presence")
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data).join("codex-rich-presence");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("codex-rich-presence");
+    }
+    PathBuf::from(".").join("codex-rich-presence")
 }
 
 fn strip_windows_long_prefix(path: &str) -> &str {

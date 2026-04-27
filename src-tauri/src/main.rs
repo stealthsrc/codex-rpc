@@ -17,8 +17,12 @@ use tauri::{
     Manager, WindowEvent,
 };
 
+#[cfg(windows)]
 const RUN_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
 const RUN_REGISTRY_NAME: &str = "CodexRichPresence";
+#[cfg(target_os = "macos")]
+const MACOS_LAUNCH_AGENT_LABEL: &str = "eu.stealthylabs.codex-rich-presence";
 
 #[derive(Default)]
 struct DaemonState {
@@ -244,7 +248,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let startup_item = CheckMenuItem::with_id(
         app,
         "startup",
-        "Start on Windows",
+        startup_menu_label(),
         true,
         startup_enabled(),
         None::<&str>,
@@ -430,6 +434,16 @@ fn sync_startup_menu(app: &tauri::AppHandle) {
 }
 
 #[cfg(windows)]
+fn startup_menu_label() -> &'static str {
+    "Start on Windows"
+}
+
+#[cfg(not(windows))]
+fn startup_menu_label() -> &'static str {
+    "Start at Login"
+}
+
+#[cfg(windows)]
 fn startup_enabled() -> bool {
     reg_command()
         .args(["query", RUN_REGISTRY_KEY, "/v", RUN_REGISTRY_NAME])
@@ -438,7 +452,14 @@ fn startup_enabled() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn startup_enabled() -> bool {
+    launch_agent_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn startup_enabled() -> bool {
     false
 }
@@ -472,7 +493,43 @@ fn set_startup_enabled(enabled: bool) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn set_startup_enabled(enabled: bool) -> Result<(), String> {
+    let path = launch_agent_path()?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        let exe = xml_escape(&exe.to_string_lossy());
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{MACOS_LAUNCH_AGENT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#
+        );
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        fs::write(path, plist).map_err(|err| err.to_string())
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn set_startup_enabled(_enabled: bool) -> Result<(), String> {
     Ok(())
 }
@@ -484,6 +541,25 @@ fn reg_command() -> std::process::Command {
     let mut command = std::process::Command::new("reg");
     command.creation_flags(0x08000000);
     command
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+    Ok(Path::new(&home)
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{MACOS_LAUNCH_AGENT_LABEL}.plist")))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn update_settings<F>(mutator: F) -> Result<RpcSettings, String>
@@ -639,6 +715,12 @@ fn status_path() -> Result<PathBuf, String> {
 fn app_data_dir() -> Result<PathBuf, String> {
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
         return Ok(Path::new(&local_app_data).join("codex-rich-presence"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(Path::new(&home)
+            .join("Library")
+            .join("Application Support")
+            .join("codex-rich-presence"));
     }
     std::env::current_dir()
         .map(|path| path.join("codex-rich-presence"))

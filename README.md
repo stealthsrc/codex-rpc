@@ -5,7 +5,7 @@
 <h1 align="center">Codex RPC</h1>
 
 <p align="center">
-  Windows system-tray Discord Rich Presence for OpenAI Codex.
+  Windows and macOS tray Discord Rich Presence for OpenAI Codex.
   Detects Codex CLI and Codex desktop, shows model/effort, and lets you control
   Discord activity from a local Tauri settings window.
 </p>
@@ -20,10 +20,11 @@
 
 ## Features
 
-- Native Windows tray app built with Tauri and Rust.
+- Native Windows/macOS tray app built with Tauri and Rust.
 - Single process app: no `codex-rpc-daemon.exe` sidecar.
-- Native process scan for `codex.exe` using Windows APIs, no PowerShell polling.
-- Detects Codex CLI vs Codex desktop even though both can be named `codex.exe`.
+- Native Windows process scan for `codex.exe`, no PowerShell polling.
+- macOS process scan for Codex CLI and Codex desktop.
+- Detects Codex CLI vs Codex desktop.
 - Discord RPC modes: Playing, Watching, Listening, Competing.
 - Discord buttons support in Watching mode.
 - Optional 5h and weekly usage display toggles.
@@ -41,11 +42,13 @@ https://github.com/StealthyLabsHQ/codex-rpc/releases/latest
 
 Recommended asset:
 
-- `Codex RPC_0.3.3_x64-setup.exe`
+- `Codex RPC_0.3.4_x64-setup.exe`
+- `Codex RPC_0.3.4_aarch64.dmg` or `Codex RPC_0.3.4_x64.dmg` on macOS
 
 Portable asset:
 
 - `codex-rich-presence.exe`
+- `codex-rich-presence-macos-arm64` or `codex-rich-presence-macos-x64`
 
 Run the app once. It starts in the system tray. Left-click the tray icon to open
 settings, or right-click for quick toggles and Quit.
@@ -75,17 +78,19 @@ Settings are saved under:
 
 ```text
 %LOCALAPPDATA%\codex-rich-presence\rpc-buttons.json
+~/Library/Application Support/codex-rich-presence/rpc-buttons.json
 ```
 
 The live status file is:
 
 ```text
 %LOCALAPPDATA%\codex-rich-presence\status.txt
+~/Library/Application Support/codex-rich-presence/status.txt
 ```
 
 ## Detection
 
-Codex CLI and Codex desktop can both appear as `codex.exe`, so Codex RPC does
+Codex CLI and Codex desktop can have similar process names, so Codex RPC does
 not rely on process name alone.
 
 Detection uses:
@@ -94,11 +99,12 @@ Detection uses:
 - parent process name;
 - native Windows process creation time.
 
-CLI is detected when the path contains `\node_modules\@openai\codex\`, or when
+CLI is detected when the path contains `node_modules/@openai/codex`, or when
 the parent is a terminal/editor shell such as `cmd.exe`, `pwsh.exe`, `wt.exe`,
-`Code.exe`, `cursor.exe`, `bash.exe`, Alacritty, Hyper, Tabby, or ConEmu.
+`Code.exe`, `cursor.exe`, `zsh`, `bash`, Terminal, iTerm2, Warp, Alacritty,
+Hyper, Tabby, or ConEmu.
 
-Everything else with a valid `codex.exe` path is treated as Codex desktop.
+Everything else with a valid Codex executable path is treated as Codex desktop.
 
 ## Codex Metadata
 
@@ -129,8 +135,8 @@ Requirements:
 
 - Node.js 22+
 - Rust/Cargo via rustup
-- Visual Studio 2022 Build Tools with MSVC v143 and Windows SDK
-- WebView2 Runtime
+- Windows: Visual Studio 2022 Build Tools with MSVC v143, Windows SDK, WebView2 Runtime
+- macOS: Xcode Command Line Tools
 
 Install dependencies:
 
@@ -150,14 +156,28 @@ cargo check
 Build Windows app:
 
 ```bash
-npm run tauri:build
+npm run tauri:build:windows
 ```
 
 Outputs:
 
 ```text
 bin\codex-rich-presence.exe
-src-tauri\target\release\bundle\nsis\Codex RPC_0.3.3_x64-setup.exe
+src-tauri\target\release\bundle\nsis\Codex RPC_0.3.4_x64-setup.exe
+```
+
+Build macOS app:
+
+```bash
+npm run tauri:build:macos
+```
+
+Outputs:
+
+```text
+bin/codex-rich-presence-macos-arm64
+src-tauri/target/release/bundle/macos/Codex RPC.app
+src-tauri/target/release/bundle/dmg/Codex RPC_0.3.4_aarch64.dmg
 ```
 
 ## Security

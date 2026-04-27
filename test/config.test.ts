@@ -9,9 +9,10 @@ import {
 } from '../src/config';
 
 describe('resolveLogFile', () => {
+  const LOCAL_APP_DATA = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
   const LOGS_ROOT = path.normalize(
     path.join(
-      process.env.LOCALAPPDATA ?? 'C:\\Users\\stub\\AppData\\Local',
+      LOCAL_APP_DATA,
       'codex-rich-presence',
       'logs',
     ),
@@ -49,9 +50,21 @@ describe('resolveLogFile', () => {
   });
 
   it('expands %LOCALAPPDATA%', () => {
-    const raw = '%LOCALAPPDATA%\\codex-rich-presence\\logs\\app.log';
-    const resolved = resolveLogFile(raw);
-    expect(resolved).toBe(path.join(LOGS_ROOT, 'app.log'));
+    const original = process.env.LOCALAPPDATA;
+    process.env.LOCALAPPDATA = LOCAL_APP_DATA;
+    const raw = process.platform === 'win32'
+      ? '%LOCALAPPDATA%\\codex-rich-presence\\logs\\app.log'
+      : '%LOCALAPPDATA%/codex-rich-presence/logs/app.log';
+    try {
+      const resolved = resolveLogFile(raw);
+      expect(resolved).toBe(path.join(LOGS_ROOT, 'app.log'));
+    } finally {
+      if (original === undefined) {
+        delete process.env.LOCALAPPDATA;
+      } else {
+        process.env.LOCALAPPDATA = original;
+      }
+    }
   });
 });
 

@@ -2,6 +2,20 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.4] - 2026-04-27
+
+### Added
+
+- macOS Tauri build with `.app`, `.dmg`, and portable arm64 binary artifacts.
+- macOS Codex process detection for CLI and desktop activity.
+- macOS Discord RPC IPC support through Unix `discord-ipc-*` sockets.
+- macOS start-at-login support through a LaunchAgent.
+
+### Changed
+
+- Settings and status files now use `~/Library/Application Support/codex-rich-presence` on macOS.
+- Build scripts now export platform-specific Tauri binaries and validate the signed macOS app bundle.
+
 ## [0.3.3] - 2026-04-27
 
 ### Added

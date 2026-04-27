@@ -1,6 +1,6 @@
 {
   "name": "codex-rich-presence",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Codex RPC",
   "main": "dist/index.js",
   "bin": {
@@ -14,13 +14,19 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build && node scripts/export-tauri-exe.js",
+    "tauri:build": "node scripts/build-tauri.js",
+    "tauri:build:macos": "node scripts/build-tauri-macos.js",
+    "tauri:build:windows": "tauri build --bundles nsis && node scripts/export-tauri-binary.js",
     "pkg": "pkg . --targets node22-win-x64 --output bin/codex-rpc-daemon.exe",
-    "dist": "node scripts/build-exe.js"
+    "dist": "node scripts/build-exe.js",
+    "dist:windows": "node scripts/build-exe.js",
+    "dist:macos": "npm run tauri:build:macos"
   },
   "pkg": {
     "scripts": "dist/**/*.js",
-    "assets": ["assets/app.ico"]
+    "assets": [
+      "assets/app.ico"
+    ]
   },
   "author": "StealthyLabs",
   "license": "MIT",
