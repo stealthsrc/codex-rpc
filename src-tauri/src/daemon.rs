@@ -35,6 +35,7 @@ use windows::{
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1494452015504293908";
 const SCAN_INTERVAL_MS: u64 = 5000;
 const UI_REFRESH_INTERVAL_MS: u64 = 500;
+const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
@@ -179,6 +180,7 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
     let mut machine = StateMachine::default();
     let mut ipc: Option<DiscordIpc> = None;
     let mut last_key = String::new();
+    let mut last_rpc_refresh_at = 0;
     let mut settings_modified = modified_ms(&settings_path);
     let mut settings = read_rpc_settings(&settings_path);
     let mut result = detect(&mut machine, idle_grace_ms);
@@ -215,7 +217,8 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
         );
 
         let key = presence_key(&display_result, &settings);
-        if key != last_key {
+        let should_refresh_rpc = now.saturating_sub(last_rpc_refresh_at) >= RPC_REFRESH_INTERVAL_MS;
+        if key != last_key || should_refresh_rpc {
             if let Some(client) = ipc.as_mut() {
                 let sent = match build_activity(&display_result, &settings) {
                     Some(activity) => client.set_activity(activity),
@@ -224,9 +227,11 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
 
                 if sent.is_ok() {
                     last_key = key;
+                    last_rpc_refresh_at = now;
                 } else {
                     ipc = None;
                     last_key.clear();
+                    last_rpc_refresh_at = 0;
                 }
             }
         }
