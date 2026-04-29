@@ -25,16 +25,19 @@ export function readLatestCodexUsage(
   maxAgeMs: number = 24 * 60 * 60 * 1000,
 ): CodexUsageSnapshot | null {
   const files = findRecentRolloutFiles(root, maxAgeMs);
+  let fallback: CodexUsageSnapshot | null = null;
   for (const file of files) {
     const lines = readTailLines(file.path);
     if (!lines) continue;
 
     for (let i = lines.length - 1; i >= 0; i--) {
       const usage = parseUsageLine(lines[i], file.mtimeMs);
-      if (usage) return usage;
+      if (!usage) continue;
+      if (usage.limitId === 'codex') return usage;
+      fallback ??= usage;
     }
   }
-  return null;
+  return fallback;
 }
 
 export function formatCodexUsage(usage: CodexUsageSnapshot | null): string | null {

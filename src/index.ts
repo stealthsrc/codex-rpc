@@ -103,6 +103,8 @@ async function main(): Promise<void> {
     const codexKey =
       `${result.codex?.model ?? ''}|${result.codex?.effort ?? ''}|` +
       `${result.codex?.serviceTier ?? ''}|${result.session?.repoName ?? ''}|` +
+      `${result.usage?.limitId ?? ''}|${result.usage?.primary?.usedPercent ?? ''}|` +
+      `${result.usage?.secondary?.usedPercent ?? ''}|` +
       `${rpcActivityMode}|` +
       `${rpcButtons.map((button) => `${button.label}:${button.url}`).join(',')}`;
     if (result.state === lastState && startMs === lastStart && codexKey === lastCodexKey) {

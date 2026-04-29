@@ -2,6 +2,13 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.6] - 2026-04-29
+
+### Fixed
+
+- Discord RPC now refreshes when usage percentages change.
+- Usage display now prefers global Codex limits over model-specific Spark limits.
+
 ## [0.3.5] - 2026-04-29
 
 ### Fixed

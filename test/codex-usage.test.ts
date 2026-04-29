@@ -80,4 +80,41 @@ describe('readLatestCodexUsage', () => {
       'Usage: 5h 79% left / week 76% left',
     );
   });
+
+  it('prefers global Codex limits over newer model-specific limits', () => {
+    writeRollout(
+      'rollout-global.jsonl',
+      [
+        {
+          type: 'event_msg',
+          payload: {
+            type: 'token_count',
+            rate_limits: {
+              limit_id: 'codex',
+              primary: { used_percent: 22, window_minutes: 300 },
+              secondary: { used_percent: 24, window_minutes: 10080 },
+            },
+          },
+        },
+      ],
+      new Date(Date.now() - 1000),
+    );
+    writeRollout('rollout-spark.jsonl', [
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          rate_limits: {
+            limit_id: 'codex_bengalfox',
+            primary: { used_percent: 0, window_minutes: 300 },
+            secondary: { used_percent: 0, window_minutes: 10080 },
+          },
+        },
+      },
+    ]);
+
+    expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
+      'Usage: 5h 78% left / week 76% left',
+    );
+  });
 });
