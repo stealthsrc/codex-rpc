@@ -143,6 +143,7 @@ struct LimitSnapshot {
 
 #[derive(Debug, Clone)]
 struct CodexUsage {
+    limit_id: Option<String>,
     primary: Option<LimitSnapshot>,
     secondary: Option<LimitSnapshot>,
     credits_remaining: Option<f64>,
@@ -858,14 +859,24 @@ fn read_codex_session() -> Option<CodexSession> {
 }
 
 fn read_codex_usage() -> Option<CodexUsage> {
-    let latest = find_latest_rollout_file(&sessions_dir(), 24 * 60 * 60 * 1000)?;
-    let lines = read_tail_lines(&latest.0, 256 * 1024)?;
-    for line in lines.iter().rev() {
-        if let Some(usage) = parse_usage_line(line) {
-            return Some(usage);
+    let mut fallback = None;
+    for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
+        let Some(lines) = read_tail_lines(&rollout.0, 256 * 1024) else {
+            continue;
+        };
+        for line in lines.iter().rev() {
+            let Some(usage) = parse_usage_line(line) else {
+                continue;
+            };
+            if usage.limit_id.as_deref() == Some("codex") {
+                return Some(usage);
+            }
+            if fallback.is_none() {
+                fallback = Some(usage);
+            }
         }
     }
-    None
+    fallback
 }
 
 fn parse_usage_line(line: &str) -> Option<CodexUsage> {
@@ -879,6 +890,10 @@ fn parse_usage_line(line: &str) -> Option<CodexUsage> {
     }
     let limits = payload.get("rate_limits")?;
     Some(CodexUsage {
+        limit_id: limits
+            .get("limit_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         primary: parse_limit(limits.get("primary")),
         secondary: parse_limit(limits.get("secondary")),
         credits_remaining: limits
@@ -935,6 +950,43 @@ fn find_latest_rollout_file(root: &Path, max_age_ms: u64) -> Option<(PathBuf, u6
     let mut best = None;
     walk(root, now_ms(), max_age_ms, &mut best);
     best
+}
+
+fn find_recent_rollout_files(root: &Path, max_age_ms: u64) -> Vec<(PathBuf, u64)> {
+    fn walk(dir: &Path, now: u64, max_age_ms: u64, files: &mut Vec<(PathBuf, u64)>) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                walk(&path, now, max_age_ms, files);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_type.is_file() || !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
+                continue;
+            }
+            let Some(mtime) = modified_ms(&path) else {
+                continue;
+            };
+            if now.saturating_sub(mtime) <= max_age_ms {
+                files.push((path, mtime));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(root, now_ms(), max_age_ms, &mut files);
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files
 }
 
 fn read_first_line(path: &Path) -> Option<String> {

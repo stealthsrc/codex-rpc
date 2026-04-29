@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.7] - 2026-04-29
+
+### Fixed
+
+- Tauri desktop daemon now uses the same multi-rollout usage selection as the CLI daemon.
+
 ## [0.3.6] - 2026-04-29
 
 ### Fixed
