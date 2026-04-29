@@ -24,14 +24,15 @@ export function readLatestCodexUsage(
   root: string = SESSIONS_ROOT,
   maxAgeMs: number = 24 * 60 * 60 * 1000,
 ): CodexUsageSnapshot | null {
-  const latest = findLatestRolloutFile(root, maxAgeMs);
-  if (!latest) return null;
-  const lines = readTailLines(latest.path);
-  if (!lines) return null;
+  const files = findRecentRolloutFiles(root, maxAgeMs);
+  for (const file of files) {
+    const lines = readTailLines(file.path);
+    if (!lines) continue;
 
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const usage = parseUsageLine(lines[i], latest.mtimeMs);
-    if (usage) return usage;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const usage = parseUsageLine(lines[i], file.mtimeMs);
+      if (usage) return usage;
+    }
   }
   return null;
 }
@@ -94,11 +95,11 @@ function formatLimit(label: string, limit: CodexLimitSnapshot | null): string | 
   return `${label} ${remaining}% left`;
 }
 
-function findLatestRolloutFile(
+function findRecentRolloutFiles(
   root: string,
   maxAgeMs: number,
-): { path: string; mtimeMs: number } | null {
-  let best: { path: string; mtimeMs: number } | null = null;
+): { path: string; mtimeMs: number }[] {
+  const files: { path: string; mtimeMs: number }[] = [];
   const now = Date.now();
 
   const walk = (dir: string): void => {
@@ -124,12 +125,12 @@ function findLatestRolloutFile(
         continue;
       }
       if (now - mtimeMs > maxAgeMs) continue;
-      if (!best || mtimeMs > best.mtimeMs) best = { path: full, mtimeMs };
+      files.push({ path: full, mtimeMs });
     }
   };
 
   walk(root);
-  return best;
+  return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
 function readTailLines(filePath: string): string[] | null {

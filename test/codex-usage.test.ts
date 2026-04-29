@@ -56,4 +56,28 @@ describe('readLatestCodexUsage', () => {
     writeRollout('rollout-empty.jsonl', [{ type: 'session_meta', payload: {} }]);
     expect(readLatestCodexUsage(root)).toBeNull();
   });
+
+  it('falls back to older recent rollouts when latest has no rate limits', () => {
+    writeRollout(
+      'rollout-with-usage.jsonl',
+      [
+        {
+          type: 'event_msg',
+          payload: {
+            type: 'token_count',
+            rate_limits: {
+              primary: { used_percent: 21, window_minutes: 300 },
+              secondary: { used_percent: 24, window_minutes: 10080 },
+            },
+          },
+        },
+      ],
+      new Date(Date.now() - 1000),
+    );
+    writeRollout('rollout-empty.jsonl', [{ type: 'session_meta', payload: {} }]);
+
+    expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
+      'Usage: 5h 79% left / week 76% left',
+    );
+  });
 });

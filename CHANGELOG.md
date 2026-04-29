@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.5] - 2026-04-29
+
+### Fixed
+
+- Usage limits now fall back across recent Codex rollout logs when the newest CLI/Desktop session has no rate-limit snapshot.
+
 ## [0.3.4] - 2026-04-27
 
 ### Added
