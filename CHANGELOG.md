@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.8] - 2026-05-01
+
+### Fixed
+
+- Usage limits now show 100% after their reset time even before Codex writes a fresh rate-limit snapshot.
+
 ## [0.3.7] - 2026-04-29
 
 ### Fixed

@@ -139,6 +139,7 @@ struct CodexSession {
 #[derive(Debug, Clone)]
 struct LimitSnapshot {
     used_percent: f64,
+    resets_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -720,12 +721,12 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(usage) = &result.usage {
         if let Some(primary) = &usage.primary {
-            parts.push(format!("5h {}%", remaining_percent(primary.used_percent)));
+            parts.push(format!("5h {}%", remaining_percent(primary)));
         }
         if let Some(secondary) = &usage.secondary {
             parts.push(format!(
                 "week {}%",
-                remaining_percent(secondary.used_percent)
+                remaining_percent(secondary)
             ));
         }
     }
@@ -768,13 +769,13 @@ fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
     if let Some(primary) = &usage.primary {
         parts.push(format!(
             "5h {}% left",
-            remaining_percent(primary.used_percent)
+            remaining_percent(primary)
         ));
     }
     if let Some(secondary) = &usage.secondary {
         parts.push(format!(
             "week {}% left",
-            remaining_percent(secondary.used_percent)
+            remaining_percent(secondary)
         ));
     }
     if let Some(credits) = usage.credits_remaining {
@@ -904,8 +905,13 @@ fn parse_usage_line(line: &str) -> Option<CodexUsage> {
 }
 
 fn parse_limit(value: Option<&Value>) -> Option<LimitSnapshot> {
+    let value = value?;
     Some(LimitSnapshot {
-        used_percent: value?.get("used_percent")?.as_f64()?,
+        used_percent: value.get("used_percent")?.as_f64()?,
+        resets_at_ms: value
+            .get("resets_at")
+            .and_then(Value::as_u64)
+            .map(|seconds| seconds.saturating_mul(1000)),
     })
 }
 
@@ -1436,8 +1442,15 @@ fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
-fn remaining_percent(used_percent: f64) -> i64 {
-    (100.0 - used_percent).max(0.0).round() as i64
+fn remaining_percent(limit: &LimitSnapshot) -> i64 {
+    if limit
+        .resets_at_ms
+        .map(|reset| reset <= now_ms())
+        .unwrap_or(false)
+    {
+        return 100;
+    }
+    (100.0 - limit.used_percent).max(0.0).round() as i64
 }
 
 fn parse_env_u64(name: &str, fallback: u64, min: u64) -> u64 {

@@ -1,6 +1,6 @@
 [package]
 name = "codex_rich_presence_tray"
-version = "0.3.7"
+version = "0.3.8"
 description = "Codex RPC"
 authors = ["StealthyLabs"]
 license = "MIT"

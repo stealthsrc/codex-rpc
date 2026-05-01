@@ -1,5 +1,6 @@
 import { formatEffort, formatModel } from '../detector/codex-config';
 import type { RpcActivityMode, RpcButtonConfig } from '../config';
+import { remainingPercent } from '../detector/codex-usage';
 import type { CodexLimitSnapshot } from '../detector/codex-usage';
 import type { DetectionResult, PresenceState } from '../detector/state';
 
@@ -138,6 +139,6 @@ function compactUsageParts(result: DetectionResult): string[] {
 
 function compactLimit(label: string, limit: CodexLimitSnapshot | null): string | null {
   if (!limit) return null;
-  const remaining = Math.max(0, Math.round(100 - limit.usedPercent));
+  const remaining = remainingPercent(limit);
   return `${label} ${remaining}%`;
 }

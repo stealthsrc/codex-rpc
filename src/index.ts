@@ -104,7 +104,7 @@ async function main(): Promise<void> {
       `${result.codex?.model ?? ''}|${result.codex?.effort ?? ''}|` +
       `${result.codex?.serviceTier ?? ''}|${result.session?.repoName ?? ''}|` +
       `${result.usage?.limitId ?? ''}|${result.usage?.primary?.usedPercent ?? ''}|` +
-      `${result.usage?.secondary?.usedPercent ?? ''}|` +
+      `${result.usage?.secondary?.usedPercent ?? ''}|${formatCodexUsage(result.usage) ?? ''}|` +
       `${rpcActivityMode}|` +
       `${rpcButtons.map((button) => `${button.label}:${button.url}`).join(',')}`;
     if (result.state === lastState && startMs === lastStart && codexKey === lastCodexKey) {

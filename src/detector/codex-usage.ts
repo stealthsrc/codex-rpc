@@ -94,8 +94,13 @@ function parseCredits(value: unknown): number | null {
 
 function formatLimit(label: string, limit: CodexLimitSnapshot | null): string | null {
   if (!limit) return null;
-  const remaining = Math.max(0, Math.round(100 - limit.usedPercent));
+  const remaining = remainingPercent(limit);
   return `${label} ${remaining}% left`;
+}
+
+export function remainingPercent(limit: CodexLimitSnapshot): number {
+  if (limit.resetsAt && limit.resetsAt.getTime() <= Date.now()) return 100;
+  return Math.max(0, Math.round(100 - limit.usedPercent));
 }
 
 function findRecentRolloutFiles(

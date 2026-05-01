@@ -10,6 +10,8 @@ function tmpRoot(): string {
 
 describe('readLatestCodexUsage', () => {
   let root: string;
+  const futureReset = Math.floor(Date.now() / 1000) + 60 * 60;
+  const pastReset = Math.floor(Date.now() / 1000) - 60;
 
   beforeEach(() => {
     root = tmpRoot();
@@ -35,8 +37,8 @@ describe('readLatestCodexUsage', () => {
           type: 'token_count',
           rate_limits: {
             limit_id: 'codex',
-            primary: { used_percent: 5, window_minutes: 300, resets_at: 1777162140 },
-            secondary: { used_percent: 19, window_minutes: 10080, resets_at: 1777477620 },
+            primary: { used_percent: 5, window_minutes: 300, resets_at: futureReset },
+            secondary: { used_percent: 19, window_minutes: 10080, resets_at: futureReset },
             credits: { remaining: 0 },
             plan_type: 'pro',
           },
@@ -55,6 +57,26 @@ describe('readLatestCodexUsage', () => {
   it('returns null when no token_count exists', () => {
     writeRollout('rollout-empty.jsonl', [{ type: 'session_meta', payload: {} }]);
     expect(readLatestCodexUsage(root)).toBeNull();
+  });
+
+  it('treats expired reset windows as fully available', () => {
+    writeRollout('rollout-reset.jsonl', [
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          rate_limits: {
+            limit_id: 'codex',
+            primary: { used_percent: 12, window_minutes: 300, resets_at: pastReset },
+            secondary: { used_percent: 32, window_minutes: 10080, resets_at: futureReset },
+          },
+        },
+      },
+    ]);
+
+    expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
+      'Usage: 5h 100% left / week 68% left',
+    );
   });
 
   it('falls back to older recent rollouts when latest has no rate limits', () => {
