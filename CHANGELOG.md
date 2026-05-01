@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.9] - 2026-05-01
+
+### Fixed
+
+- Model and reasoning effort now sync from the latest Codex turn context instead of stale top-level config.
+
 ## [0.3.8] - 2026-05-01
 
 ### Fixed

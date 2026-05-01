@@ -826,21 +826,71 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
 }
 
 fn read_codex_config() -> Option<CodexConfig> {
-    let raw = fs::read_to_string(home_dir().join(".codex").join("config.toml")).ok()?;
     let mut cfg = CodexConfig::default();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            break;
-        }
-        if let Some(value) = extract_toml_string(trimmed, "model") {
-            cfg.model = Some(value);
-        }
-        if let Some(value) = extract_toml_string(trimmed, "model_reasoning_effort") {
-            cfg.effort = Some(value);
+    if let Ok(raw) = fs::read_to_string(home_dir().join(".codex").join("config.toml")) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                break;
+            }
+            if let Some(value) = extract_toml_string(trimmed, "model") {
+                cfg.model = Some(value);
+            }
+            if let Some(value) = extract_toml_string(trimmed, "model_reasoning_effort") {
+                cfg.effort = Some(value);
+            }
         }
     }
-    Some(cfg)
+    if let Some(runtime_cfg) = read_turn_context_config() {
+        if runtime_cfg.model.is_some() {
+            cfg.model = runtime_cfg.model;
+        }
+        if runtime_cfg.effort.is_some() {
+            cfg.effort = runtime_cfg.effort;
+        }
+    }
+    if cfg.model.is_none() && cfg.effort.is_none() {
+        None
+    } else {
+        Some(cfg)
+    }
+}
+
+fn read_turn_context_config() -> Option<CodexConfig> {
+    for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
+        let Some(lines) = read_tail_lines(&rollout.0, 1024 * 1024) else {
+            continue;
+        };
+        for line in lines.iter().rev() {
+            if let Some(cfg) = parse_turn_context_line(line) {
+                return Some(cfg);
+            }
+        }
+    }
+    None
+}
+
+fn parse_turn_context_line(line: &str) -> Option<CodexConfig> {
+    let obj: Value = serde_json::from_str(line).ok()?;
+    if obj.get("type").and_then(Value::as_str) != Some("turn_context") {
+        return None;
+    }
+    let payload = obj.get("payload")?;
+    let cfg = CodexConfig {
+        model: payload
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        effort: payload
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    if cfg.model.is_none() && cfg.effort.is_none() {
+        None
+    } else {
+        Some(cfg)
+    }
 }
 
 fn read_codex_session() -> Option<CodexSession> {

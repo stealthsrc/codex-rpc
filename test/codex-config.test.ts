@@ -1,7 +1,24 @@
-import { describe, expect, it } from 'vitest';
-import { formatEffort, formatModel, parseCodexConfig } from '../src/detector/codex-config';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { formatEffort, formatModel, parseCodexConfig, readCodexConfig } from '../src/detector/codex-config';
+
+function tmpRoot(): string {
+  return path.join(os.tmpdir(), `codex-config-test-${process.pid}-${Date.now()}`);
+}
 
 describe('parseCodexConfig', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = tmpRoot();
+    fs.mkdirSync(root, { recursive: true });
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it('extracts top-level model, effort, service_tier', () => {
     const toml = [
       'model = "gpt-5.4"',
@@ -41,6 +58,30 @@ describe('parseCodexConfig', () => {
     const c = parseCodexConfig(toml);
     expect(c.serviceTier).toBe('fast');
     expect(c.model).toBeNull();
+  });
+
+  it('overlays active turn context model and effort', () => {
+    const configPath = path.join(root, 'config.toml');
+    const sessionsRoot = path.join(root, 'sessions');
+    const rolloutPath = path.join(sessionsRoot, 'rollout-a.jsonl');
+    fs.writeFileSync(
+      configPath,
+      ['model = "gpt-5.5"', 'model_reasoning_effort = "medium"'].join('\n'),
+    );
+    fs.mkdirSync(sessionsRoot, { recursive: true });
+    fs.writeFileSync(
+      rolloutPath,
+      JSON.stringify({
+        type: 'turn_context',
+        payload: { model: 'gpt-5.4', effort: 'high' },
+      }) + '\n',
+    );
+
+    expect(readCodexConfig(configPath, sessionsRoot)).toEqual({
+      model: 'gpt-5.4',
+      effort: 'high',
+      serviceTier: null,
+    });
   });
 });
 

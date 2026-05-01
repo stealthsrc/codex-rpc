@@ -9,6 +9,8 @@ export interface CodexConfig {
 }
 
 const DEFAULT_PATH = path.join(os.homedir(), '.codex', 'config.toml');
+const SESSIONS_ROOT = path.join(os.homedir(), '.codex', 'sessions');
+const READ_TAIL_BYTES = 1024 * 1024;
 
 /**
  * Minimal TOML extractor — we only care about three top-level string keys.
@@ -23,13 +25,24 @@ export function parseCodexConfig(tomlContent: string): CodexConfig {
   };
 }
 
-export function readCodexConfig(configPath: string = DEFAULT_PATH): CodexConfig | null {
+export function readCodexConfig(
+  configPath: string = DEFAULT_PATH,
+  sessionsRoot: string = SESSIONS_ROOT,
+): CodexConfig | null {
+  let fileConfig: CodexConfig | null = null;
   try {
     const raw = fs.readFileSync(configPath, 'utf8');
-    return parseCodexConfig(raw);
+    fileConfig = parseCodexConfig(raw);
   } catch {
-    return null;
+    fileConfig = null;
   }
+  const runtimeConfig = readLatestTurnContextConfig(sessionsRoot);
+  if (!fileConfig && !runtimeConfig) return null;
+  return {
+    model: runtimeConfig?.model ?? fileConfig?.model ?? null,
+    effort: runtimeConfig?.effort ?? fileConfig?.effort ?? null,
+    serviceTier: fileConfig?.serviceTier ?? null,
+  };
 }
 
 /**
@@ -53,6 +66,88 @@ function extractTopLevelString(toml: string, key: string): string | null {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function readLatestTurnContextConfig(root: string): Pick<CodexConfig, 'model' | 'effort'> | null {
+  const files = findRecentRolloutFiles(root, 24 * 60 * 60 * 1000);
+  for (const file of files) {
+    const lines = readTailLines(file.path);
+    if (!lines) continue;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const config = parseTurnContextLine(lines[i]);
+      if (config) return config;
+    }
+  }
+  return null;
+}
+
+function parseTurnContextLine(line: string): Pick<CodexConfig, 'model' | 'effort'> | null {
+  try {
+    const obj = JSON.parse(line);
+    if (obj?.type !== 'turn_context') return null;
+    const payload = obj.payload;
+    const model = typeof payload?.model === 'string' ? payload.model : null;
+    const effort = typeof payload?.effort === 'string' ? payload.effort : null;
+    if (!model && !effort) return null;
+    return { model, effort };
+  } catch {
+    return null;
+  }
+}
+
+function findRecentRolloutFiles(
+  root: string,
+  maxAgeMs: number,
+): { path: string; mtimeMs: number }[] {
+  const files: { path: string; mtimeMs: number }[] = [];
+  const now = Date.now();
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) {
+        continue;
+      }
+      let mtimeMs: number;
+      try {
+        mtimeMs = fs.statSync(full).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (now - mtimeMs <= maxAgeMs) files.push({ path: full, mtimeMs });
+    }
+  };
+  walk(root);
+  return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+function readTailLines(filePath: string): string[] | null {
+  try {
+    const stat = fs.statSync(filePath);
+    const length = Math.min(stat.size, READ_TAIL_BYTES);
+    const offset = stat.size - length;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(length);
+      fs.readSync(fd, buf, 0, length, offset);
+      const text = buf.toString('utf8');
+      const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
+      return offset > 0 ? lines.slice(1) : lines;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
 }
 
 /** Normalize CLI-style shorthand to user-facing label (mirrors Codex app UI). */
