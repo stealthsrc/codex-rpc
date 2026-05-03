@@ -2,7 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { formatCodexUsage, readLatestCodexUsage } from '../src/detector/codex-usage';
+import {
+  formatCodexUsage,
+  parseAccountUsageResponse,
+  readLatestCodexUsage,
+} from '../src/detector/codex-usage';
 
 function tmpRoot(): string {
   return path.join(os.tmpdir(), `codex-usage-test-${process.pid}-${Date.now()}`);
@@ -158,5 +162,33 @@ describe('readLatestCodexUsage', () => {
     expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
       'Usage: 5h 78% left / week 76% left',
     );
+  });
+
+  it('parses account app-server rate limits keyed by codex', () => {
+    const usage = parseAccountUsageResponse(
+      JSON.stringify({
+        id: 1,
+        result: {
+          rateLimits: {
+            limitId: 'codex_bengalfox',
+            primary: { usedPercent: 0, windowDurationMins: 300 },
+            secondary: { usedPercent: 0, windowDurationMins: 10080 },
+          },
+          rateLimitsByLimitId: {
+            codex: {
+              limitId: 'codex',
+              planType: 'prolite',
+              primary: { usedPercent: 9, windowDurationMins: 300, resetsAt: futureReset },
+              secondary: { usedPercent: 45, windowDurationMins: 10080, resetsAt: futureReset },
+              credits: { balance: '0', hasCredits: false, unlimited: false },
+            },
+          },
+        },
+      }),
+      Date.now(),
+    );
+
+    expect(usage?.limitId).toBe('codex');
+    expect(formatCodexUsage(usage)).toBe('Usage: 5h 91% left / week 55% left / credits 0');
   });
 });
