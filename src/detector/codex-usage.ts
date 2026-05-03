@@ -22,7 +22,9 @@ export interface CodexUsageSnapshot {
 const SESSIONS_ROOT = path.join(os.homedir(), '.codex', 'sessions');
 const READ_TAIL_BYTES = 256 * 1024;
 const ACCOUNT_USAGE_CACHE_MS = 30 * 1000;
+const LOCAL_USAGE_REFRESH_MS = 60 * 1000;
 let accountUsageCache: { checkedAt: number; usage: CodexUsageSnapshot | null } | null = null;
+let lastLocalUsageRefreshMs = 0;
 
 export function readLatestCodexUsage(
   root: string = SESSIONS_ROOT,
@@ -31,6 +33,7 @@ export function readLatestCodexUsage(
   if (root === SESSIONS_ROOT) {
     const accountUsage = readCodexAccountUsage();
     if (accountUsage) return accountUsage;
+    refreshLocalCodexUsage();
   }
 
   const files = findRecentRolloutFiles(root, maxAgeMs);
@@ -47,6 +50,21 @@ export function readLatestCodexUsage(
     }
   }
   return fallback;
+}
+
+function refreshLocalCodexUsage(): void {
+  const now = Date.now();
+  if (now - lastLocalUsageRefreshMs < LOCAL_USAGE_REFRESH_MS) return;
+  lastLocalUsageRefreshMs = now;
+
+  for (const command of codexCommandCandidates()) {
+    const result = spawnSync(command, ['login', 'status'], {
+      encoding: 'utf8',
+      timeout: 2500,
+      windowsHide: true,
+    });
+    if (result.status === 0) return;
+  }
 }
 
 function readCodexAccountUsage(): CodexUsageSnapshot | null {
