@@ -6,7 +6,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     thread,
@@ -43,10 +43,12 @@ const SCAN_INTERVAL_MS: u64 = 5000;
 const UI_REFRESH_INTERVAL_MS: u64 = 500;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
+const LOCAL_USAGE_REFRESH_MS: u64 = 60_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
 const ACTIVITY_COMPETING: u8 = 5;
+static LAST_LOCAL_USAGE_REFRESH_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RpcButton {
@@ -916,6 +918,7 @@ fn read_codex_usage() -> Option<CodexUsage> {
     if let Some(usage) = read_codex_account_usage() {
         return Some(usage);
     }
+    refresh_local_codex_usage();
 
     let mut fallback = None;
     for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
@@ -986,6 +989,48 @@ fn read_codex_account_usage() -> Option<CodexUsage> {
         }
     }
     None
+}
+
+fn refresh_local_codex_usage() {
+    let now = now_ms();
+    let last = LAST_LOCAL_USAGE_REFRESH_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < LOCAL_USAGE_REFRESH_MS {
+        return;
+    }
+    LAST_LOCAL_USAGE_REFRESH_MS.store(now, Ordering::Relaxed);
+
+    for command in codex_command_candidates() {
+        if run_codex_command(&command, ["login", "status"]).unwrap_or(false) {
+            return;
+        }
+    }
+}
+
+fn run_codex_command<const N: usize>(command: &Path, args: [&str; N]) -> Option<bool> {
+    let mut cmd = std::process::Command::new(command);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let started = now_ms();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if now_ms().saturating_sub(started) < 2500 => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Some(false);
+            }
+        }
+    }
 }
 
 fn codex_command_candidates() -> Vec<PathBuf> {
