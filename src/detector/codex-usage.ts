@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 export interface CodexLimitSnapshot {
   usedPercent: number;
@@ -20,11 +21,18 @@ export interface CodexUsageSnapshot {
 
 const SESSIONS_ROOT = path.join(os.homedir(), '.codex', 'sessions');
 const READ_TAIL_BYTES = 256 * 1024;
+const ACCOUNT_USAGE_CACHE_MS = 30 * 1000;
+let accountUsageCache: { checkedAt: number; usage: CodexUsageSnapshot | null } | null = null;
 
 export function readLatestCodexUsage(
   root: string = SESSIONS_ROOT,
   maxAgeMs: number = 24 * 60 * 60 * 1000,
 ): CodexUsageSnapshot | null {
+  if (root === SESSIONS_ROOT) {
+    const accountUsage = readCodexAccountUsage();
+    if (accountUsage) return accountUsage;
+  }
+
   const files = findRecentRolloutFiles(root, maxAgeMs);
   let fallback: CodexUsageSnapshot | null = null;
   for (const file of files) {
@@ -39,6 +47,84 @@ export function readLatestCodexUsage(
     }
   }
   return fallback;
+}
+
+function readCodexAccountUsage(): CodexUsageSnapshot | null {
+  const now = Date.now();
+  if (accountUsageCache && now - accountUsageCache.checkedAt < ACCOUNT_USAGE_CACHE_MS) {
+    return accountUsageCache.usage;
+  }
+
+  const usage = readCodexAccountUsageUncached(now);
+  accountUsageCache = { checkedAt: now, usage };
+  return usage;
+}
+
+function readCodexAccountUsageUncached(observedAtMs: number): CodexUsageSnapshot | null {
+  for (const command of codexCommandCandidates()) {
+    const result = spawnSync(command, ['app-server', 'proxy'], {
+      input: '{"id":1,"method":"account/rateLimits/read","params":null}\n',
+      encoding: 'utf8',
+      timeout: 2500,
+      windowsHide: true,
+    });
+    if (result.status !== 0 || !result.stdout.trim()) continue;
+
+    const usage = parseAccountUsageResponse(result.stdout, observedAtMs);
+    if (usage) return usage;
+  }
+  return null;
+}
+
+function codexCommandCandidates(): string[] {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    return [
+      appData ? path.join(appData, 'npm', 'codex.cmd') : null,
+      'codex.cmd',
+      'codex',
+    ].filter((value): value is string => Boolean(value));
+  }
+  return ['codex', '/opt/homebrew/bin/codex', '/usr/local/bin/codex'];
+}
+
+export function parseAccountUsageResponse(
+  raw: string,
+  observedAtMs: number,
+): CodexUsageSnapshot | null {
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if ((msg?.id !== 1 && msg?.id !== '1') || !msg.result) continue;
+      return parseAccountUsagePayload(msg.result, observedAtMs);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function parseAccountUsagePayload(
+  payload: Record<string, unknown>,
+  observedAtMs: number,
+): CodexUsageSnapshot | null {
+  const byLimitId = payload.rateLimitsByLimitId;
+  const limits =
+    byLimitId && typeof byLimitId === 'object'
+      ? ((byLimitId as Record<string, unknown>).codex ?? payload.rateLimits)
+      : payload.rateLimits;
+  if (!limits || typeof limits !== 'object') return null;
+
+  const record = limits as Record<string, unknown>;
+  return {
+    limitId: typeof record.limitId === 'string' ? record.limitId : null,
+    primary: parseAccountLimit(record.primary, observedAtMs),
+    secondary: parseAccountLimit(record.secondary, observedAtMs),
+    creditsRemaining: parseCredits(record.credits),
+    planType: typeof record.planType === 'string' ? record.planType : null,
+    lastActivityMs: observedAtMs,
+  };
 }
 
 export function formatCodexUsage(usage: CodexUsageSnapshot | null): string | null {
@@ -84,10 +170,26 @@ function parseLimit(value: unknown, observedAtMs: number): CodexLimitSnapshot | 
   return { usedPercent, windowMinutes, resetsAt, observedAtMs };
 }
 
+function parseAccountLimit(value: unknown, observedAtMs: number): CodexLimitSnapshot | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const usedPercent = typeof record.usedPercent === 'number' ? record.usedPercent : null;
+  if (usedPercent === null) return null;
+  const windowMinutes =
+    typeof record.windowDurationMins === 'number' ? record.windowDurationMins : null;
+  const resetsAt =
+    typeof record.resetsAt === 'number' ? new Date(record.resetsAt * 1000) : null;
+  return { usedPercent, windowMinutes, resetsAt, observedAtMs };
+}
+
 function parseCredits(value: unknown): number | null {
   if (typeof value === 'number') return value;
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
+  if (typeof record.balance === 'string') {
+    const parsed = Number(record.balance);
+    if (Number.isFinite(parsed)) return parsed;
+  }
   if (typeof record.remaining === 'number') return record.remaining;
   if (typeof record.balance === 'number') return record.balance;
   return null;

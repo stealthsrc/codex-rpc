@@ -17,6 +17,8 @@ use std::{
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 use windows::{
@@ -911,6 +913,10 @@ fn read_codex_session() -> Option<CodexSession> {
 }
 
 fn read_codex_usage() -> Option<CodexUsage> {
+    if let Some(usage) = read_codex_account_usage() {
+        return Some(usage);
+    }
+
     let mut fallback = None;
     for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
         let Some(lines) = read_tail_lines(&rollout.0, 256 * 1024) else {
@@ -929,6 +935,115 @@ fn read_codex_usage() -> Option<CodexUsage> {
         }
     }
     fallback
+}
+
+fn read_codex_account_usage() -> Option<CodexUsage> {
+    let request = b"{\"id\":1,\"method\":\"account/rateLimits/read\",\"params\":null}\n";
+    for command in codex_command_candidates() {
+        let mut cmd = std::process::Command::new(&command);
+        cmd.args(["app-server", "proxy"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x08000000);
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            continue;
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(request);
+        }
+        drop(child.stdin.take());
+
+        let started = now_ms();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        break;
+                    }
+                    let mut stdout = String::new();
+                    if let Some(mut pipe) = child.stdout.take() {
+                        let _ = pipe.read_to_string(&mut stdout);
+                    }
+                    if let Some(usage) = parse_account_usage_response(&stdout, now_ms()) {
+                        return Some(usage);
+                    }
+                    break;
+                }
+                Ok(None) if now_ms().saturating_sub(started) < 2500 => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn codex_command_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            candidates.push(PathBuf::from(app_data).join("npm").join("codex.cmd"));
+        }
+        candidates.push(PathBuf::from("codex.cmd"));
+        candidates.push(PathBuf::from("codex"));
+    }
+    #[cfg(not(windows))]
+    {
+        candidates.push(PathBuf::from("codex"));
+        candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+        candidates.push(PathBuf::from("/usr/local/bin/codex"));
+    }
+    candidates
+}
+
+fn parse_account_usage_response(raw: &str, observed_at_ms: u64) -> Option<CodexUsage> {
+    for line in raw.lines() {
+        let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let id_matches = msg
+            .get("id")
+            .and_then(|id| {
+                id.as_u64()
+                    .map(|value| value == 1)
+                    .or_else(|| id.as_str().map(|value| value == "1"))
+            })
+            .unwrap_or(false);
+        if !id_matches {
+            continue;
+        }
+        if let Some(usage) = parse_account_usage_payload(msg.get("result")?, observed_at_ms) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+fn parse_account_usage_payload(payload: &Value, observed_at_ms: u64) -> Option<CodexUsage> {
+    let limits = payload
+        .get("rateLimitsByLimitId")
+        .and_then(|by_id| by_id.get("codex"))
+        .or_else(|| payload.get("rateLimits"))?;
+    Some(CodexUsage {
+        limit_id: limits
+            .get("limitId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        primary: parse_account_limit(limits.get("primary"), observed_at_ms),
+        secondary: parse_account_limit(limits.get("secondary"), observed_at_ms),
+        credits_remaining: parse_credits(limits.get("credits")),
+    })
 }
 
 fn parse_usage_line(line: &str, observed_at_ms: u64) -> Option<CodexUsage> {
@@ -965,6 +1080,26 @@ fn parse_limit(value: Option<&Value>, observed_at_ms: u64) -> Option<LimitSnapsh
             .map(|seconds| seconds.saturating_mul(1000)),
         observed_at_ms,
     })
+}
+
+fn parse_account_limit(value: Option<&Value>, observed_at_ms: u64) -> Option<LimitSnapshot> {
+    let value = value?;
+    Some(LimitSnapshot {
+        used_percent: value.get("usedPercent")?.as_f64()?,
+        resets_at_ms: value
+            .get("resetsAt")
+            .and_then(Value::as_u64)
+            .map(|seconds| seconds.saturating_mul(1000)),
+        observed_at_ms,
+    })
+}
+
+fn parse_credits(value: Option<&Value>) -> Option<f64> {
+    let credits = value?;
+    credits
+        .get("remaining")
+        .or_else(|| credits.get("balance"))
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
 }
 
 fn find_latest_rollout_file(root: &Path, max_age_ms: u64) -> Option<(PathBuf, u64)> {
