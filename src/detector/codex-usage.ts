@@ -6,6 +6,7 @@ export interface CodexLimitSnapshot {
   usedPercent: number;
   windowMinutes: number | null;
   resetsAt: Date | null;
+  observedAtMs: number;
 }
 
 export interface CodexUsageSnapshot {
@@ -60,8 +61,8 @@ function parseUsageLine(line: string, lastActivityMs: number): CodexUsageSnapsho
     if (!limits || typeof limits !== 'object') return null;
     return {
       limitId: typeof limits.limit_id === 'string' ? limits.limit_id : null,
-      primary: parseLimit(limits.primary),
-      secondary: parseLimit(limits.secondary),
+      primary: parseLimit(limits.primary, lastActivityMs),
+      secondary: parseLimit(limits.secondary, lastActivityMs),
       creditsRemaining: parseCredits(limits.credits),
       planType: typeof limits.plan_type === 'string' ? limits.plan_type : null,
       lastActivityMs,
@@ -71,7 +72,7 @@ function parseUsageLine(line: string, lastActivityMs: number): CodexUsageSnapsho
   }
 }
 
-function parseLimit(value: unknown): CodexLimitSnapshot | null {
+function parseLimit(value: unknown, observedAtMs: number): CodexLimitSnapshot | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
   const usedPercent = typeof record.used_percent === 'number' ? record.used_percent : null;
@@ -80,7 +81,7 @@ function parseLimit(value: unknown): CodexLimitSnapshot | null {
     typeof record.window_minutes === 'number' ? record.window_minutes : null;
   const resetsAt =
     typeof record.resets_at === 'number' ? new Date(record.resets_at * 1000) : null;
-  return { usedPercent, windowMinutes, resetsAt };
+  return { usedPercent, windowMinutes, resetsAt, observedAtMs };
 }
 
 function parseCredits(value: unknown): number | null {
@@ -99,7 +100,13 @@ function formatLimit(label: string, limit: CodexLimitSnapshot | null): string | 
 }
 
 export function remainingPercent(limit: CodexLimitSnapshot): number {
-  if (limit.resetsAt && limit.resetsAt.getTime() <= Date.now()) return 100;
+  if (
+    limit.resetsAt &&
+    limit.resetsAt.getTime() <= Date.now() &&
+    limit.observedAtMs < limit.resetsAt.getTime()
+  ) {
+    return 100;
+  }
   return Math.max(0, Math.round(100 - limit.usedPercent));
 }
 

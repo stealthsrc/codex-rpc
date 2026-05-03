@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.10] - 2026-05-03
+
+### Fixed
+
+- Usage reset fallback now trusts post-reset snapshots instead of forcing 5h usage to 100%.
+
 ## [0.3.9] - 2026-05-01
 
 ### Fixed

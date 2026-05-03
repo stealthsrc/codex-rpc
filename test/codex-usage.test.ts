@@ -72,10 +72,30 @@ describe('readLatestCodexUsage', () => {
           },
         },
       },
-    ]);
+    ], new Date((pastReset - 60) * 1000));
 
     expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
       'Usage: 5h 100% left / week 68% left',
+    );
+  });
+
+  it('trusts post-reset snapshots with non-zero usage', () => {
+    writeRollout('rollout-post-reset.jsonl', [
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          rate_limits: {
+            limit_id: 'codex',
+            primary: { used_percent: 9, window_minutes: 300, resets_at: pastReset },
+            secondary: { used_percent: 45, window_minutes: 10080, resets_at: futureReset },
+          },
+        },
+      },
+    ]);
+
+    expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
+      'Usage: 5h 91% left / week 55% left',
     );
   });
 

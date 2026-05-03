@@ -140,6 +140,7 @@ struct CodexSession {
 struct LimitSnapshot {
     used_percent: f64,
     resets_at_ms: Option<u64>,
+    observed_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -916,7 +917,7 @@ fn read_codex_usage() -> Option<CodexUsage> {
             continue;
         };
         for line in lines.iter().rev() {
-            let Some(usage) = parse_usage_line(line) else {
+            let Some(usage) = parse_usage_line(line, rollout.1) else {
                 continue;
             };
             if usage.limit_id.as_deref() == Some("codex") {
@@ -930,7 +931,7 @@ fn read_codex_usage() -> Option<CodexUsage> {
     fallback
 }
 
-fn parse_usage_line(line: &str) -> Option<CodexUsage> {
+fn parse_usage_line(line: &str, observed_at_ms: u64) -> Option<CodexUsage> {
     let obj: Value = serde_json::from_str(line).ok()?;
     if obj.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
@@ -945,8 +946,8 @@ fn parse_usage_line(line: &str) -> Option<CodexUsage> {
             .get("limit_id")
             .and_then(Value::as_str)
             .map(str::to_string),
-        primary: parse_limit(limits.get("primary")),
-        secondary: parse_limit(limits.get("secondary")),
+        primary: parse_limit(limits.get("primary"), observed_at_ms),
+        secondary: parse_limit(limits.get("secondary"), observed_at_ms),
         credits_remaining: limits
             .get("credits")
             .and_then(|credits| credits.get("remaining").or_else(|| credits.get("balance")))
@@ -954,7 +955,7 @@ fn parse_usage_line(line: &str) -> Option<CodexUsage> {
     })
 }
 
-fn parse_limit(value: Option<&Value>) -> Option<LimitSnapshot> {
+fn parse_limit(value: Option<&Value>, observed_at_ms: u64) -> Option<LimitSnapshot> {
     let value = value?;
     Some(LimitSnapshot {
         used_percent: value.get("used_percent")?.as_f64()?,
@@ -962,6 +963,7 @@ fn parse_limit(value: Option<&Value>) -> Option<LimitSnapshot> {
             .get("resets_at")
             .and_then(Value::as_u64)
             .map(|seconds| seconds.saturating_mul(1000)),
+        observed_at_ms,
     })
 }
 
@@ -1495,7 +1497,7 @@ fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 fn remaining_percent(limit: &LimitSnapshot) -> i64 {
     if limit
         .resets_at_ms
-        .map(|reset| reset <= now_ms())
+        .map(|reset| reset <= now_ms() && limit.observed_at_ms < reset)
         .unwrap_or(false)
     {
         return 100;
