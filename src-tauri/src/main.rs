@@ -536,9 +536,13 @@ fn set_startup_enabled(_enabled: bool) -> Result<(), String> {
 
 #[cfg(windows)]
 fn reg_command() -> std::process::Command {
+    use std::ffi::OsString;
     use std::os::windows::process::CommandExt;
 
-    let mut command = std::process::Command::new("reg");
+    let system_root = std::env::var_os("SystemRoot")
+        .unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    let reg_path = Path::new(&system_root).join("System32").join("reg.exe");
+    let mut command = std::process::Command::new(reg_path);
     command.creation_flags(0x08000000);
     command
 }

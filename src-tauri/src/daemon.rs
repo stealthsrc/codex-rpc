@@ -1040,15 +1040,20 @@ fn codex_command_candidates() -> Vec<PathBuf> {
         if let Some(app_data) = std::env::var_os("APPDATA") {
             candidates.push(PathBuf::from(app_data).join("npm").join("codex.cmd"));
         }
-        candidates.push(PathBuf::from("codex.cmd"));
-        candidates.push(PathBuf::from("codex"));
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            candidates.push(PathBuf::from(program_files).join("nodejs").join("codex.cmd"));
+        }
     }
     #[cfg(not(windows))]
     {
-        candidates.push(PathBuf::from("codex"));
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join(".local").join("bin").join("codex"));
+        }
         candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
         candidates.push(PathBuf::from("/usr/local/bin/codex"));
+        candidates.push(PathBuf::from("/usr/bin/codex"));
     }
+    candidates.retain(|p| p.is_file());
     candidates
 }
 

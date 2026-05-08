@@ -95,15 +95,30 @@ function readCodexAccountUsageUncached(observedAtMs: number): CodexUsageSnapshot
 }
 
 function codexCommandCandidates(): string[] {
+  let candidates: string[];
   if (process.platform === 'win32') {
     const appData = process.env.APPDATA;
-    return [
+    const programFiles = process.env.ProgramFiles;
+    candidates = [
       appData ? path.join(appData, 'npm', 'codex.cmd') : null,
-      'codex.cmd',
-      'codex',
+      programFiles ? path.join(programFiles, 'nodejs', 'codex.cmd') : null,
+    ].filter((value): value is string => Boolean(value));
+  } else {
+    const home = process.env.HOME;
+    candidates = [
+      home ? path.join(home, '.local', 'bin', 'codex') : null,
+      '/opt/homebrew/bin/codex',
+      '/usr/local/bin/codex',
+      '/usr/bin/codex',
     ].filter((value): value is string => Boolean(value));
   }
-  return ['codex', '/opt/homebrew/bin/codex', '/usr/local/bin/codex'];
+  return candidates.filter((p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function parseAccountUsageResponse(
