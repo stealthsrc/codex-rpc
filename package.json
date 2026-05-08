@@ -17,6 +17,8 @@
     "tauri:build": "node scripts/build-tauri.js",
     "tauri:build:macos": "node scripts/build-tauri-macos.js",
     "tauri:build:windows": "tauri build --bundles nsis && node scripts/export-tauri-binary.js",
+    "remotion:preview": "npm --prefix remotion run preview",
+    "remotion:render": "npm --prefix remotion run render",
     "pkg": "pkg . --targets node22-win-x64 --output bin/codex-rpc-daemon.exe",
     "dist": "node scripts/build-exe.js",
     "dist:windows": "node scripts/build-exe.js",

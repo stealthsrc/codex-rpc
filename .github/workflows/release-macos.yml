@@ -9,16 +9,24 @@ on:
         default: v0.3.8
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-macos:
     runs-on: macos-14
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
+      - name: Validate release tag format
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
 
       - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b
         with:
