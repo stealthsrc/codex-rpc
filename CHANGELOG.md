@@ -2,6 +2,30 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.13] - 2026-05-08
+
+### Security
+
+- Codex CLI invocations (Rust daemon + Node detector) now use only absolute trusted paths — bare `codex`/`codex.cmd` candidates removed, preventing PATH/search-order hijacking.
+- `reg.exe` invocation on Windows now uses `%SystemRoot%\System32\reg.exe` instead of an unqualified name, preventing binary-planting attacks on the startup-toggle feature.
+- macOS release workflow hardened: `contents: write` scoped to upload step only; tag input validated against `vX.Y.Z` format; checkout forced to `refs/tags/` with `persist-credentials: false`.
+
+## [0.3.12] - 2026-05-07
+
+### Fixed
+
+- Local Codex usage refresh (login status) now respects its 60-second cooldown correctly in both the Rust daemon and Node detector.
+
+## [0.3.11] - 2026-05-07
+
+### Added
+
+- Account usage sync via Codex CLI `app-server proxy` JSON-RPC — live rate-limit data is now preferred over local rollout file parsing.
+
+### Fixed
+
+- macOS release workflow added for automated DMG/binary publishing.
+
 ## [0.3.10] - 2026-05-03
 
 ### Fixed
