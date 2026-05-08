@@ -19,9 +19,11 @@ jobs:
       contents: write
     steps:
       - name: Validate release tag format
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
         with:
