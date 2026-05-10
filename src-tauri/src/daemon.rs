@@ -79,6 +79,10 @@ struct RpcSettings {
     show_spark_primary_usage: bool,
     #[serde(default = "default_show_usage")]
     show_spark_weekly_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_effort: bool,
+    #[serde(default = "default_show_usage")]
+    show_credits: bool,
 }
 
 impl Default for RpcSettings {
@@ -100,6 +104,8 @@ impl Default for RpcSettings {
             show_weekly_usage: true,
             show_spark_primary_usage: true,
             show_spark_weekly_usage: true,
+            show_effort: true,
+            show_credits: true,
         }
     }
 }
@@ -854,6 +860,14 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
         }
         if !settings.show_spark_weekly_usage {
             usage.spark_secondary = None;
+        }
+        if !settings.show_credits {
+            usage.credits_remaining = None;
+        }
+    }
+    if !settings.show_effort {
+        if let Some(codex) = result.codex.as_mut() {
+            codex.effort = None;
         }
     }
 }
@@ -1755,7 +1769,7 @@ fn small_image_text(state: PresenceState) -> &'static str {
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
     format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         result.state,
         result.started_at_ms,
         result
@@ -1779,6 +1793,8 @@ fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
         settings.show_weekly_usage,
         settings.show_spark_primary_usage,
         settings.show_spark_weekly_usage,
+        settings.show_effort,
+        settings.show_credits,
         settings
             .buttons
             .iter()

@@ -63,6 +63,10 @@ struct RpcSettings {
     show_spark_primary_usage: bool,
     #[serde(default = "default_show_usage")]
     show_spark_weekly_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_effort: bool,
+    #[serde(default = "default_show_usage")]
+    show_credits: bool,
 }
 
 impl Default for RpcSettings {
@@ -84,6 +88,8 @@ impl Default for RpcSettings {
             show_weekly_usage: true,
             show_spark_primary_usage: true,
             show_spark_weekly_usage: true,
+            show_effort: true,
+            show_credits: true,
         }
     }
 }
@@ -616,6 +622,7 @@ fn normalize_settings(mut settings: RpcSettings) -> RpcSettings {
         settings.show_weekly_usage = false;
         settings.show_spark_primary_usage = false;
         settings.show_spark_weekly_usage = false;
+        settings.show_credits = false;
     }
     settings.show_usage = None;
 

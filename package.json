@@ -1,6 +1,6 @@
 {
   "name": "codex-rich-presence",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "Codex RPC",
   "main": "dist/index.js",
   "bin": {

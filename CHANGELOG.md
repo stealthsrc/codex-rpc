@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.16] - 2026-05-10
+
+### Added
+
+- Two new Settings toggles under **Display** — `Effort` and `Credits` — to hide the reasoning effort label and the credits-remaining counter from status bar and Discord state independently.
+
 ## [0.3.15] - 2026-05-10
 
 ### Changed

@@ -14,6 +14,8 @@ const fields = {
   usageWeekToggle: document.querySelector('#usage-week-toggle'),
   usageSpark5hToggle: document.querySelector('#usage-spark-5h-toggle'),
   usageSparkWeekToggle: document.querySelector('#usage-spark-week-toggle'),
+  effortToggle: document.querySelector('#effort-toggle'),
+  creditsToggle: document.querySelector('#credits-toggle'),
   status: document.querySelector('#status'),
   message: document.querySelector('#message'),
   previewActivity: document.querySelector('#preview-activity'),
@@ -41,6 +43,8 @@ function readForm() {
     show_weekly_usage: fields.usageWeekToggle.dataset.enabled === 'true',
     show_spark_primary_usage: fields.usageSpark5hToggle.dataset.enabled === 'true',
     show_spark_weekly_usage: fields.usageSparkWeekToggle.dataset.enabled === 'true',
+    show_effort: fields.effortToggle.dataset.enabled === 'true',
+    show_credits: fields.creditsToggle.dataset.enabled === 'true',
   };
 }
 
@@ -59,6 +63,8 @@ function writeForm(settings) {
     !legacyHidden && settings.show_spark_weekly_usage !== false,
     'Spark wk',
   );
+  syncUsageToggle(fields.effortToggle, settings.show_effort !== false, 'Effort');
+  syncUsageToggle(fields.creditsToggle, !legacyHidden && settings.show_credits !== false, 'Credits');
   for (let i = 0; i < 2; i += 1) {
     fields.labels[i].value = settings.buttons?.[i]?.label || '';
     fields.urls[i].value = settings.buttons?.[i]?.url || '';
@@ -117,13 +123,22 @@ function updatePreview() {
     competing: 'Competing Codex',
     playing: 'Playing Codex',
   }[mode] || 'Playing Codex';
+  const modelPart = previewModel(status.model, settings);
   const usageParts = previewUsageParts(status.usage, settings);
-  const stateParts = [status.model, ...usageParts].filter(Boolean);
+  const stateParts = [modelPart, ...usageParts].filter(Boolean);
 
   fields.previewActivity.textContent = activity;
   fields.previewDetails.textContent = previewDetails(status.codex, mode);
   fields.previewState.textContent = truncateText(stateParts.join(' - ') || status.codex, 64);
   renderPreviewButtons(mode, settings.buttons);
+}
+
+function previewModel(model, settings) {
+  if (!model) return '';
+  if (settings.show_effort) return model;
+  // model line format: "Model - Effort". Drop everything after the first " - " when effort hidden.
+  const idx = model.indexOf(' - ');
+  return idx === -1 ? model : model.slice(0, idx);
 }
 
 function renderPreviewButtons(mode, buttons) {
@@ -165,6 +180,7 @@ function previewUsageParts(usage, settings) {
       }
       if (lower.startsWith('5h')) return settings.show_primary_usage;
       if (lower.startsWith('week')) return settings.show_weekly_usage;
+      if (lower.startsWith('credits')) return settings.show_credits;
       return true;
     })
     .map((part) => part.replace(/\s+left$/i, ''));
@@ -233,6 +249,14 @@ fields.usageSparkWeekToggle.addEventListener('click', () => {
     fields.usageSparkWeekToggle.dataset.enabled !== 'true',
     'Spark wk',
   );
+  scheduleSave();
+});
+fields.effortToggle.addEventListener('click', () => {
+  syncUsageToggle(fields.effortToggle, fields.effortToggle.dataset.enabled !== 'true', 'Effort');
+  scheduleSave();
+});
+fields.creditsToggle.addEventListener('click', () => {
+  syncUsageToggle(fields.creditsToggle, fields.creditsToggle.dataset.enabled !== 'true', 'Credits');
   scheduleSave();
 });
 for (const input of [...fields.labels, ...fields.urls]) input.addEventListener('input', scheduleSave);
