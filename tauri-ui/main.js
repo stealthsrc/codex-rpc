@@ -12,6 +12,8 @@ const fields = {
   urls: [document.querySelector('#url0'), document.querySelector('#url1')],
   usage5hToggle: document.querySelector('#usage-5h-toggle'),
   usageWeekToggle: document.querySelector('#usage-week-toggle'),
+  usageSpark5hToggle: document.querySelector('#usage-spark-5h-toggle'),
+  usageSparkWeekToggle: document.querySelector('#usage-spark-week-toggle'),
   status: document.querySelector('#status'),
   message: document.querySelector('#message'),
   previewActivity: document.querySelector('#preview-activity'),
@@ -37,6 +39,8 @@ function readForm() {
     buttons,
     show_primary_usage: fields.usage5hToggle.dataset.enabled === 'true',
     show_weekly_usage: fields.usageWeekToggle.dataset.enabled === 'true',
+    show_spark_primary_usage: fields.usageSpark5hToggle.dataset.enabled === 'true',
+    show_spark_weekly_usage: fields.usageSparkWeekToggle.dataset.enabled === 'true',
   };
 }
 
@@ -45,6 +49,16 @@ function writeForm(settings) {
   const legacyHidden = settings.show_usage === false;
   syncUsageToggle(fields.usage5hToggle, !legacyHidden && settings.show_primary_usage !== false, '5h');
   syncUsageToggle(fields.usageWeekToggle, !legacyHidden && settings.show_weekly_usage !== false, 'Week');
+  syncUsageToggle(
+    fields.usageSpark5hToggle,
+    !legacyHidden && settings.show_spark_primary_usage !== false,
+    'Spark 5h',
+  );
+  syncUsageToggle(
+    fields.usageSparkWeekToggle,
+    !legacyHidden && settings.show_spark_weekly_usage !== false,
+    'Spark wk',
+  );
   for (let i = 0; i < 2; i += 1) {
     fields.labels[i].value = settings.buttons?.[i]?.label || '';
     fields.urls[i].value = settings.buttons?.[i]?.url || '';
@@ -144,8 +158,13 @@ function previewUsageParts(usage, settings) {
     .map((part) => part.trim())
     .filter(Boolean)
     .filter((part) => {
-      if (part.toLowerCase().startsWith('5h')) return settings.show_primary_usage;
-      if (part.toLowerCase().startsWith('week')) return settings.show_weekly_usage;
+      const lower = part.toLowerCase();
+      if (lower.startsWith('spark 5h')) return settings.show_spark_primary_usage;
+      if (lower.startsWith('spark week') || lower.startsWith('spark wk')) {
+        return settings.show_spark_weekly_usage;
+      }
+      if (lower.startsWith('5h')) return settings.show_primary_usage;
+      if (lower.startsWith('week')) return settings.show_weekly_usage;
       return true;
     })
     .map((part) => part.replace(/\s+left$/i, ''));
@@ -198,6 +217,22 @@ fields.usage5hToggle.addEventListener('click', () => {
 });
 fields.usageWeekToggle.addEventListener('click', () => {
   syncUsageToggle(fields.usageWeekToggle, fields.usageWeekToggle.dataset.enabled !== 'true', 'Week');
+  scheduleSave();
+});
+fields.usageSpark5hToggle.addEventListener('click', () => {
+  syncUsageToggle(
+    fields.usageSpark5hToggle,
+    fields.usageSpark5hToggle.dataset.enabled !== 'true',
+    'Spark 5h',
+  );
+  scheduleSave();
+});
+fields.usageSparkWeekToggle.addEventListener('click', () => {
+  syncUsageToggle(
+    fields.usageSparkWeekToggle,
+    fields.usageSparkWeekToggle.dataset.enabled !== 'true',
+    'Spark wk',
+  );
   scheduleSave();
 });
 for (const input of [...fields.labels, ...fields.urls]) input.addEventListener('input', scheduleSave);

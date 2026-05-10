@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 export interface CodexLimitSnapshot {
   usedPercent: number;
@@ -16,6 +16,10 @@ export interface CodexUsageSnapshot {
   secondary: CodexLimitSnapshot | null;
   creditsRemaining: number | null;
   planType: string | null;
+  sparkLimitId: string | null;
+  sparkLabel: string | null;
+  sparkPrimary: CodexLimitSnapshot | null;
+  sparkSecondary: CodexLimitSnapshot | null;
   lastActivityMs: number;
 }
 
@@ -37,6 +41,8 @@ export function readLatestCodexUsage(
   }
 
   const files = findRecentRolloutFiles(root, maxAgeMs);
+  let codex: CodexUsageSnapshot | null = null;
+  let spark: CodexUsageSnapshot | null = null;
   let fallback: CodexUsageSnapshot | null = null;
   for (const file of files) {
     const lines = readTailLines(file.path);
@@ -45,11 +51,29 @@ export function readLatestCodexUsage(
     for (let i = lines.length - 1; i >= 0; i--) {
       const usage = parseUsageLine(lines[i], file.mtimeMs);
       if (!usage) continue;
-      if (usage.limitId === 'codex') return usage;
-      fallback ??= usage;
+      if (usage.limitId === 'codex') {
+        codex ??= usage;
+      } else if (
+        usage.limitId &&
+        (usage.limitId.startsWith('codex_') || usage.limitId.toLowerCase().includes('spark'))
+      ) {
+        spark ??= usage;
+      } else {
+        fallback ??= usage;
+      }
+      if (codex && spark) break;
     }
+    if (codex && spark) break;
   }
-  return fallback;
+  const result = codex ?? fallback;
+  if (!result) return null;
+  if (spark) {
+    result.sparkLimitId = spark.limitId;
+    result.sparkLabel = null;
+    result.sparkPrimary = spark.primary;
+    result.sparkSecondary = spark.secondary;
+  }
+  return result;
 }
 
 function refreshLocalCodexUsage(): void {
@@ -67,31 +91,119 @@ function refreshLocalCodexUsage(): void {
   }
 }
 
+// app-server reads stdin asynchronously; spawnSync can't keep stdin alive long
+// enough for the rate-limits response to land. We kick off a background refresh
+// instead and serve the previously-cached value synchronously.
+let accountUsageRefreshInFlight = false;
+
 function readCodexAccountUsage(): CodexUsageSnapshot | null {
   const now = Date.now();
-  if (accountUsageCache && now - accountUsageCache.checkedAt < ACCOUNT_USAGE_CACHE_MS) {
-    return accountUsageCache.usage;
+  if (!accountUsageCache || now - accountUsageCache.checkedAt >= ACCOUNT_USAGE_CACHE_MS) {
+    scheduleAccountUsageRefresh();
   }
-
-  const usage = readCodexAccountUsageUncached(now);
-  accountUsageCache = { checkedAt: now, usage };
-  return usage;
+  return accountUsageCache?.usage ?? null;
 }
 
-function readCodexAccountUsageUncached(observedAtMs: number): CodexUsageSnapshot | null {
-  for (const command of codexCommandCandidates()) {
-    const result = spawnSync(command, ['app-server', 'proxy'], {
-      input: '{"id":1,"method":"account/rateLimits/read","params":null}\n',
-      encoding: 'utf8',
-      timeout: 2500,
-      windowsHide: true,
+function scheduleAccountUsageRefresh(): void {
+  if (accountUsageRefreshInFlight) return;
+  accountUsageRefreshInFlight = true;
+  refreshCodexAccountUsage()
+    .then((usage) => {
+      accountUsageCache = { checkedAt: Date.now(), usage };
+    })
+    .catch(() => {
+      accountUsageCache = { checkedAt: Date.now(), usage: accountUsageCache?.usage ?? null };
+    })
+    .finally(() => {
+      accountUsageRefreshInFlight = false;
     });
-    if (result.status !== 0 || !result.stdout.trim()) continue;
+}
 
-    const usage = parseAccountUsageResponse(result.stdout, observedAtMs);
+async function refreshCodexAccountUsage(): Promise<CodexUsageSnapshot | null> {
+  const initRequest =
+    '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInfo":{"name":"codex-rpc","version":"0"}}}\n';
+  const readRequest =
+    '{"jsonrpc":"2.0","id":1,"method":"account/rateLimits/read","params":null}\n';
+
+  for (const command of codexCommandCandidates()) {
+    const stdout = await runAppServerProbe(command, initRequest + readRequest);
+    if (!stdout) continue;
+    const usage = parseAccountUsageResponse(stdout, Date.now());
     if (usage) return usage;
   }
   return null;
+}
+
+function runAppServerProbe(command: string, request: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, ['app-server'], {
+        stdio: ['pipe', 'pipe', 'ignore'],
+        // .cmd shims on Windows need cmd.exe (Node 22+ rejects them with EINVAL otherwise).
+        shell: process.platform === 'win32' && command.toLowerCase().endsWith('.cmd'),
+        windowsHide: true,
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+
+    let buffer = '';
+    let settled = false;
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+      resolve(value);
+    };
+
+    const timeout = setTimeout(() => finish(buffer || null), 5000);
+
+    child.on('error', () => {
+      clearTimeout(timeout);
+      finish(null);
+    });
+    child.on('exit', () => {
+      clearTimeout(timeout);
+      finish(buffer || null);
+    });
+    child.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      if (lineWithIdOne(buffer)) {
+        clearTimeout(timeout);
+        finish(buffer);
+      }
+    });
+
+    if (child.stdin) {
+      child.stdin.on('error', () => {
+        /* ignore broken pipe after kill */
+      });
+      child.stdin.write(request);
+    }
+  });
+}
+
+function lineWithIdOne(text: string): boolean {
+  const newlineIdx = text.lastIndexOf('\n');
+  if (newlineIdx <= 0) return false;
+  const lines = text.slice(0, newlineIdx).split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj?.id === 1 || obj?.id === '1') return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 function codexCommandCandidates(): string[] {
@@ -142,20 +254,43 @@ function parseAccountUsagePayload(
   payload: Record<string, unknown>,
   observedAtMs: number,
 ): CodexUsageSnapshot | null {
-  const byLimitId = payload.rateLimitsByLimitId;
-  const limits =
-    byLimitId && typeof byLimitId === 'object'
-      ? ((byLimitId as Record<string, unknown>).codex ?? payload.rateLimits)
-      : payload.rateLimits;
+  const byLimitId =
+    payload.rateLimitsByLimitId && typeof payload.rateLimitsByLimitId === 'object'
+      ? (payload.rateLimitsByLimitId as Record<string, unknown>)
+      : null;
+  const codexEntry = byLimitId?.codex;
+  const limits = codexEntry ?? payload.rateLimits;
   if (!limits || typeof limits !== 'object') return null;
 
   const record = limits as Record<string, unknown>;
+  let sparkLimitId: string | null = null;
+  let sparkLabel: string | null = null;
+  let sparkPrimary: CodexLimitSnapshot | null = null;
+  let sparkSecondary: CodexLimitSnapshot | null = null;
+  if (byLimitId) {
+    for (const [key, value] of Object.entries(byLimitId)) {
+      if (key === 'codex') continue;
+      if (!value || typeof value !== 'object') continue;
+      const entry = value as Record<string, unknown>;
+      const name = typeof entry.limitName === 'string' ? entry.limitName : null;
+      if (!name || !name.toLowerCase().includes('spark')) continue;
+      sparkLimitId = key;
+      sparkLabel = name;
+      sparkPrimary = parseAccountLimit(entry.primary, observedAtMs);
+      sparkSecondary = parseAccountLimit(entry.secondary, observedAtMs);
+      break;
+    }
+  }
   return {
     limitId: typeof record.limitId === 'string' ? record.limitId : null,
     primary: parseAccountLimit(record.primary, observedAtMs),
     secondary: parseAccountLimit(record.secondary, observedAtMs),
     creditsRemaining: parseCredits(record.credits),
     planType: typeof record.planType === 'string' ? record.planType : null,
+    sparkLimitId,
+    sparkLabel,
+    sparkPrimary,
+    sparkSecondary,
     lastActivityMs: observedAtMs,
   };
 }
@@ -165,8 +300,12 @@ export function formatCodexUsage(usage: CodexUsageSnapshot | null): string | nul
   const parts: string[] = [];
   const primary = formatLimit('5h', usage.primary);
   const secondary = formatLimit('week', usage.secondary);
+  const sparkPrimary = formatLimit('Spark 5h', usage.sparkPrimary);
+  const sparkSecondary = formatLimit('Spark week', usage.sparkSecondary);
   if (primary) parts.push(primary);
   if (secondary) parts.push(secondary);
+  if (sparkPrimary) parts.push(sparkPrimary);
+  if (sparkSecondary) parts.push(sparkSecondary);
   if (usage.creditsRemaining !== null) parts.push(`credits ${usage.creditsRemaining}`);
   if (parts.length === 0) return null;
   return `Usage: ${parts.join(' / ')}`;
@@ -184,6 +323,10 @@ function parseUsageLine(line: string, lastActivityMs: number): CodexUsageSnapsho
       secondary: parseLimit(limits.secondary, lastActivityMs),
       creditsRemaining: parseCredits(limits.credits),
       planType: typeof limits.plan_type === 'string' ? limits.plan_type : null,
+      sparkLimitId: null,
+      sparkLabel: null,
+      sparkPrimary: null,
+      sparkSecondary: null,
       lastActivityMs,
     };
   } catch {

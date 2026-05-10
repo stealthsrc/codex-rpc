@@ -44,11 +44,20 @@ const UI_REFRESH_INTERVAL_MS: u64 = 500;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const LOCAL_USAGE_REFRESH_MS: u64 = 60_000;
+const ACCOUNT_USAGE_CACHE_MS: u64 = 30_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
 const ACTIVITY_COMPETING: u8 = 5;
 static LAST_LOCAL_USAGE_REFRESH_MS: AtomicU64 = AtomicU64::new(0);
+static ACCOUNT_USAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<AccountUsageCache>> =
+    std::sync::OnceLock::new();
+
+#[derive(Default)]
+struct AccountUsageCache {
+    checked_at_ms: u64,
+    usage: Option<CodexUsage>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RpcButton {
@@ -66,6 +75,10 @@ struct RpcSettings {
     show_primary_usage: bool,
     #[serde(default = "default_show_usage")]
     show_weekly_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_spark_primary_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_spark_weekly_usage: bool,
 }
 
 impl Default for RpcSettings {
@@ -85,6 +98,8 @@ impl Default for RpcSettings {
             show_usage: None,
             show_primary_usage: true,
             show_weekly_usage: true,
+            show_spark_primary_usage: true,
+            show_spark_weekly_usage: true,
         }
     }
 }
@@ -153,6 +168,10 @@ struct CodexUsage {
     primary: Option<LimitSnapshot>,
     secondary: Option<LimitSnapshot>,
     credits_remaining: Option<f64>,
+    spark_limit_id: Option<String>,
+    spark_label: Option<String>,
+    spark_primary: Option<LimitSnapshot>,
+    spark_secondary: Option<LimitSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -729,10 +748,13 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
             parts.push(format!("5h {}%", remaining_percent(primary)));
         }
         if let Some(secondary) = &usage.secondary {
-            parts.push(format!(
-                "week {}%",
-                remaining_percent(secondary)
-            ));
+            parts.push(format!("week {}%", remaining_percent(secondary)));
+        }
+        if let Some(primary) = &usage.spark_primary {
+            parts.push(format!("Spark 5h {}%", remaining_percent(primary)));
+        }
+        if let Some(secondary) = &usage.spark_secondary {
+            parts.push(format!("Spark wk {}%", remaining_percent(secondary)));
         }
     }
     parts
@@ -772,16 +794,16 @@ fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
     let usage = usage?;
     let mut parts = Vec::new();
     if let Some(primary) = &usage.primary {
-        parts.push(format!(
-            "5h {}% left",
-            remaining_percent(primary)
-        ));
+        parts.push(format!("5h {}% left", remaining_percent(primary)));
     }
     if let Some(secondary) = &usage.secondary {
-        parts.push(format!(
-            "week {}% left",
-            remaining_percent(secondary)
-        ));
+        parts.push(format!("week {}% left", remaining_percent(secondary)));
+    }
+    if let Some(primary) = &usage.spark_primary {
+        parts.push(format!("Spark 5h {}% left", remaining_percent(primary)));
+    }
+    if let Some(secondary) = &usage.spark_secondary {
+        parts.push(format!("Spark week {}% left", remaining_percent(secondary)));
     }
     if let Some(credits) = usage.credits_remaining {
         parts.push(format!("credits {}", credits.round()));
@@ -826,6 +848,12 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
         }
         if !settings.show_weekly_usage {
             usage.secondary = None;
+        }
+        if !settings.show_spark_primary_usage {
+            usage.spark_primary = None;
+        }
+        if !settings.show_spark_weekly_usage {
+            usage.spark_secondary = None;
         }
     }
 }
@@ -920,7 +948,9 @@ fn read_codex_usage() -> Option<CodexUsage> {
     }
     refresh_local_codex_usage();
 
-    let mut fallback = None;
+    let mut codex: Option<CodexUsage> = None;
+    let mut spark: Option<CodexUsage> = None;
+    let mut fallback: Option<CodexUsage> = None;
     for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
         let Some(lines) = read_tail_lines(&rollout.0, 256 * 1024) else {
             continue;
@@ -929,22 +959,66 @@ fn read_codex_usage() -> Option<CodexUsage> {
             let Some(usage) = parse_usage_line(line, rollout.1) else {
                 continue;
             };
-            if usage.limit_id.as_deref() == Some("codex") {
-                return Some(usage);
+            match usage.limit_id.as_deref() {
+                Some("codex") => {
+                    if codex.is_none() {
+                        codex = Some(usage);
+                    }
+                }
+                Some(id) if id.starts_with("codex_") || id.contains("spark") => {
+                    if spark.is_none() {
+                        spark = Some(usage);
+                    }
+                }
+                _ => {
+                    if fallback.is_none() {
+                        fallback = Some(usage);
+                    }
+                }
             }
-            if fallback.is_none() {
-                fallback = Some(usage);
+            if codex.is_some() && spark.is_some() {
+                break;
             }
         }
+        if codex.is_some() && spark.is_some() {
+            break;
+        }
     }
-    fallback
+    let mut result = codex.or(fallback)?;
+    if let Some(spark) = spark {
+        result.spark_limit_id = spark.limit_id;
+        result.spark_label = None;
+        result.spark_primary = spark.primary;
+        result.spark_secondary = spark.secondary;
+    }
+    Some(result)
 }
 
 fn read_codex_account_usage() -> Option<CodexUsage> {
-    let request = b"{\"id\":1,\"method\":\"account/rateLimits/read\",\"params\":null}\n";
+    let cache = ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(AccountUsageCache::default()));
+    let now = now_ms();
+    {
+        let guard = cache.lock().ok()?;
+        if guard.checked_at_ms != 0 && now.saturating_sub(guard.checked_at_ms) < ACCOUNT_USAGE_CACHE_MS {
+            return guard.usage.clone();
+        }
+    }
+    let usage = read_codex_account_usage_uncached();
+    if let Ok(mut guard) = cache.lock() {
+        guard.checked_at_ms = now_ms();
+        guard.usage = usage.clone();
+    }
+    usage
+}
+
+fn read_codex_account_usage_uncached() -> Option<CodexUsage> {
+    const ACCOUNT_USAGE_TIMEOUT_MS: u64 = 5000;
+    const INIT_REQUEST: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-rpc\",\"version\":\"0\"}}}\n";
+    const READ_REQUEST: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"account/rateLimits/read\",\"params\":null}\n";
+
     for command in codex_command_candidates() {
         let mut cmd = std::process::Command::new(&command);
-        cmd.args(["app-server", "proxy"])
+        cmd.arg("app-server")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
@@ -957,38 +1031,67 @@ fn read_codex_account_usage() -> Option<CodexUsage> {
         };
 
         if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(request);
+            let _ = stdin.write_all(INIT_REQUEST);
+            let _ = stdin.write_all(READ_REQUEST);
+            let _ = stdin.flush();
         }
-        drop(child.stdin.take());
+
+        let mut stdout = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                continue;
+            }
+        };
 
         let started = now_ms();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() {
-                        break;
+        let mut buffer = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 1024];
+        let mut completed_response: Option<String> = None;
+        while now_ms().saturating_sub(started) < ACCOUNT_USAGE_TIMEOUT_MS {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if let Some(idx) = buffer.iter().rposition(|byte| *byte == b'\n') {
+                        let text = String::from_utf8_lossy(&buffer[..idx]).into_owned();
+                        if text.lines().any(line_is_id_one) {
+                            completed_response = Some(text);
+                            break;
+                        }
                     }
-                    let mut stdout = String::new();
-                    if let Some(mut pipe) = child.stdout.take() {
-                        let _ = pipe.read_to_string(&mut stdout);
-                    }
-                    if let Some(usage) = parse_account_usage_response(&stdout, now_ms()) {
-                        return Some(usage);
-                    }
-                    break;
                 }
-                Ok(None) if now_ms().saturating_sub(started) < 2500 => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
-                }
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        if let Some(raw) = completed_response {
+            if let Some(usage) = parse_account_usage_response(&raw, now_ms()) {
+                return Some(usage);
             }
         }
     }
     None
+}
+
+fn line_is_id_one(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            value.get("id").and_then(|id| {
+                id.as_u64()
+                    .map(|value| value == 1)
+                    .or_else(|| id.as_str().map(|value| value == "1"))
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn refresh_local_codex_usage() {
@@ -1081,10 +1184,25 @@ fn parse_account_usage_response(raw: &str, observed_at_ms: u64) -> Option<CodexU
 }
 
 fn parse_account_usage_payload(payload: &Value, observed_at_ms: u64) -> Option<CodexUsage> {
-    let limits = payload
+    let by_id = payload
         .get("rateLimitsByLimitId")
-        .and_then(|by_id| by_id.get("codex"))
+        .and_then(Value::as_object);
+    let codex_entry = by_id.and_then(|map| map.get("codex"));
+    let limits = codex_entry
         .or_else(|| payload.get("rateLimits"))?;
+    let spark = by_id
+        .and_then(|map| {
+            map.iter()
+                .find(|(key, value)| {
+                    key.as_str() != "codex"
+                        && value
+                            .get("limitName")
+                            .and_then(Value::as_str)
+                            .map(|name| name.to_ascii_lowercase().contains("spark"))
+                            .unwrap_or(false)
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+        });
     Some(CodexUsage {
         limit_id: limits
             .get("limitId")
@@ -1093,6 +1211,17 @@ fn parse_account_usage_payload(payload: &Value, observed_at_ms: u64) -> Option<C
         primary: parse_account_limit(limits.get("primary"), observed_at_ms),
         secondary: parse_account_limit(limits.get("secondary"), observed_at_ms),
         credits_remaining: parse_credits(limits.get("credits")),
+        spark_limit_id: spark.as_ref().map(|(key, _)| key.clone()),
+        spark_label: spark
+            .as_ref()
+            .and_then(|(_, value)| value.get("limitName").and_then(Value::as_str))
+            .map(str::to_string),
+        spark_primary: spark
+            .as_ref()
+            .and_then(|(_, value)| parse_account_limit(value.get("primary"), observed_at_ms)),
+        spark_secondary: spark
+            .as_ref()
+            .and_then(|(_, value)| parse_account_limit(value.get("secondary"), observed_at_ms)),
     })
 }
 
@@ -1117,6 +1246,10 @@ fn parse_usage_line(line: &str, observed_at_ms: u64) -> Option<CodexUsage> {
             .get("credits")
             .and_then(|credits| credits.get("remaining").or_else(|| credits.get("balance")))
             .and_then(Value::as_f64),
+        spark_limit_id: None,
+        spark_label: None,
+        spark_primary: None,
+        spark_secondary: None,
     })
 }
 
@@ -1622,7 +1755,7 @@ fn small_image_text(state: PresenceState) -> &'static str {
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
     format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         result.state,
         result.started_at_ms,
         result
@@ -1644,6 +1777,8 @@ fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
         settings.mode,
         settings.show_primary_usage,
         settings.show_weekly_usage,
+        settings.show_spark_primary_usage,
+        settings.show_spark_weekly_usage,
         settings
             .buttons
             .iter()

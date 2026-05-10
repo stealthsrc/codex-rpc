@@ -134,7 +134,11 @@ function buildLargeImageText(result: DetectionResult): string {
 function compactUsageParts(result: DetectionResult): string[] {
   const primary = compactLimit('5h', result.usage?.primary ?? null);
   const secondary = compactLimit('week', result.usage?.secondary ?? null);
-  return [primary, secondary].filter((p): p is string => Boolean(p));
+  const sparkPrimary = compactLimit('Spark 5h', result.usage?.sparkPrimary ?? null);
+  const sparkSecondary = compactLimit('Spark wk', result.usage?.sparkSecondary ?? null);
+  return [primary, secondary, sparkPrimary, sparkSecondary].filter(
+    (p): p is string => Boolean(p),
+  );
 }
 
 function compactLimit(label: string, limit: CodexLimitSnapshot | null): string | null {

@@ -127,7 +127,7 @@ describe('readLatestCodexUsage', () => {
     );
   });
 
-  it('prefers global Codex limits over newer model-specific limits', () => {
+  it('keeps codex as the primary group while surfacing spark separately', () => {
     writeRollout(
       'rollout-global.jsonl',
       [
@@ -160,7 +160,7 @@ describe('readLatestCodexUsage', () => {
     ]);
 
     expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
-      'Usage: 5h 78% left / week 76% left',
+      'Usage: 5h 78% left / week 76% left / Spark 5h 100% left / Spark week 100% left',
     );
   });
 
@@ -190,5 +190,79 @@ describe('readLatestCodexUsage', () => {
 
     expect(usage?.limitId).toBe('codex');
     expect(formatCodexUsage(usage)).toBe('Usage: 5h 91% left / week 55% left / credits 0');
+  });
+
+  it('parses Spark rate limits alongside the codex group', () => {
+    const usage = parseAccountUsageResponse(
+      JSON.stringify({
+        id: 1,
+        result: {
+          rateLimitsByLimitId: {
+            codex: {
+              limitId: 'codex',
+              primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: futureReset },
+              secondary: { usedPercent: 19, windowDurationMins: 10080, resetsAt: futureReset },
+              credits: { balance: '0' },
+              planType: 'prolite',
+            },
+            codex_bengalfox: {
+              limitId: 'codex_bengalfox',
+              limitName: 'GPT-5.3-Codex-Spark',
+              primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: futureReset },
+              secondary: { usedPercent: 0, windowDurationMins: 10080, resetsAt: futureReset },
+            },
+          },
+        },
+      }),
+      Date.now(),
+    );
+
+    expect(usage?.limitId).toBe('codex');
+    expect(usage?.sparkLimitId).toBe('codex_bengalfox');
+    expect(usage?.sparkLabel).toBe('GPT-5.3-Codex-Spark');
+    expect(usage?.sparkPrimary?.usedPercent).toBe(0);
+    expect(usage?.sparkSecondary?.usedPercent).toBe(0);
+    expect(formatCodexUsage(usage)).toBe(
+      'Usage: 5h 100% left / week 81% left / Spark 5h 100% left / Spark week 100% left / credits 0',
+    );
+  });
+
+  it('merges Spark rollout entries with the codex limits', () => {
+    writeRollout(
+      'rollout-codex.jsonl',
+      [
+        {
+          type: 'event_msg',
+          payload: {
+            type: 'token_count',
+            rate_limits: {
+              limit_id: 'codex',
+              primary: { used_percent: 22, window_minutes: 300 },
+              secondary: { used_percent: 24, window_minutes: 10080 },
+            },
+          },
+        },
+      ],
+      new Date(Date.now() - 1000),
+    );
+    writeRollout('rollout-spark.jsonl', [
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          rate_limits: {
+            limit_id: 'codex_bengalfox',
+            primary: { used_percent: 0, window_minutes: 300 },
+            secondary: { used_percent: 0, window_minutes: 10080 },
+          },
+        },
+      },
+    ]);
+
+    const usage = readLatestCodexUsage(root);
+    expect(usage?.limitId).toBe('codex');
+    expect(usage?.sparkLimitId).toBe('codex_bengalfox');
+    expect(usage?.sparkPrimary?.usedPercent).toBe(0);
+    expect(usage?.sparkSecondary?.usedPercent).toBe(0);
   });
 });

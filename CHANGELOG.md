@@ -2,6 +2,23 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.14] - 2026-05-10
+
+### Added
+
+- GPT-5.3-Codex-Spark rate limits (5h + Weekly) parsed from `rateLimitsByLimitId` and surfaced in tray status, Discord state, and large-image tooltip.
+- Two new Settings toggles — "Spark 5h" and "Spark wk" — with matching tray menu entries.
+
+### Fixed
+
+- Account usage now appears immediately after Codex launches (no first-request needed). The probe spawns `codex app-server` directly with a JSON-RPC `initialize` + `account/rateLimits/read` handshake instead of `app-server proxy`, which required an existing control socket that the desktop app doesn't expose.
+- Spark toggles now persist correctly: `RpcSettings` was duplicated between `daemon.rs` and `main.rs`; only the daemon copy carried the new fields, so saves dropped them silently and the daemon always reverted to defaults.
+
+### Changed
+
+- Settings panel label `RPC mode` → `IPC Mode` to match the underlying Discord IPC mechanism.
+- Account-usage probe now caches results for 30 seconds (Rust) / refreshes asynchronously in the background (Node) to avoid spawning a fresh `codex app-server` on every detection tick.
+
 ## [0.3.13] - 2026-05-08
 
 ### Security

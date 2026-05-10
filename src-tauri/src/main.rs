@@ -40,6 +40,8 @@ struct TrayMenuState {
     mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     show_5h: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     show_week: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    show_spark_5h: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    show_spark_week: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     startup: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
@@ -59,6 +61,10 @@ struct RpcSettings {
     show_primary_usage: bool,
     #[serde(default = "default_show_usage")]
     show_weekly_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_spark_primary_usage: bool,
+    #[serde(default = "default_show_usage")]
+    show_spark_weekly_usage: bool,
 }
 
 impl Default for RpcSettings {
@@ -78,6 +84,8 @@ impl Default for RpcSettings {
             show_usage: None,
             show_primary_usage: true,
             show_weekly_usage: true,
+            show_spark_primary_usage: true,
+            show_spark_weekly_usage: true,
         }
     }
 }
@@ -245,6 +253,22 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         settings.show_weekly_usage,
         None::<&str>,
     )?;
+    let show_spark_5h_item = CheckMenuItem::with_id(
+        app,
+        "show_spark_5h",
+        "Show Spark 5h usage",
+        true,
+        settings.show_spark_primary_usage,
+        None::<&str>,
+    )?;
+    let show_spark_week_item = CheckMenuItem::with_id(
+        app,
+        "show_spark_week",
+        "Show Spark week usage",
+        true,
+        settings.show_spark_weekly_usage,
+        None::<&str>,
+    )?;
     let startup_item = CheckMenuItem::with_id(
         app,
         "startup",
@@ -267,6 +291,8 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             &mode_competing_item,
             &show_5h_item,
             &show_week_item,
+            &show_spark_5h_item,
+            &show_spark_week_item,
             &startup_item,
             &separator_2,
             &quit_item,
@@ -295,6 +321,14 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_week
         .lock()
         .expect("tray menu mutex poisoned") = Some(show_week_item.clone());
+    *tray_state
+        .show_spark_5h
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(show_spark_5h_item.clone());
+    *tray_state
+        .show_spark_week
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(show_spark_week_item.clone());
     *tray_state.startup.lock().expect("tray menu mutex poisoned") = Some(startup_item.clone());
 
     TrayIconBuilder::new()
@@ -337,6 +371,20 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             "show_week" => {
                 if let Ok(settings) = update_settings(|settings| {
                     settings.show_weekly_usage = !settings.show_weekly_usage
+                }) {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "show_spark_5h" => {
+                if let Ok(settings) = update_settings(|settings| {
+                    settings.show_spark_primary_usage = !settings.show_spark_primary_usage
+                }) {
+                    sync_tray_menu(app, &settings);
+                }
+            }
+            "show_spark_week" => {
+                if let Ok(settings) = update_settings(|settings| {
+                    settings.show_spark_weekly_usage = !settings.show_spark_weekly_usage
                 }) {
                     sync_tray_menu(app, &settings);
                 }
@@ -399,6 +447,16 @@ fn sync_tray_menu(app: &tauri::AppHandle, settings: &RpcSettings) {
         .lock()
         .expect("tray menu mutex poisoned")
         .clone();
+    let show_spark_5h = state
+        .show_spark_5h
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let show_spark_week = state
+        .show_spark_week
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
 
     if let Some(item) = mode_watching {
         let _ = item.set_checked(settings.mode == "watching");
@@ -417,6 +475,12 @@ fn sync_tray_menu(app: &tauri::AppHandle, settings: &RpcSettings) {
     }
     if let Some(item) = show_week {
         let _ = item.set_checked(settings.show_weekly_usage);
+    }
+    if let Some(item) = show_spark_5h {
+        let _ = item.set_checked(settings.show_spark_primary_usage);
+    }
+    if let Some(item) = show_spark_week {
+        let _ = item.set_checked(settings.show_spark_weekly_usage);
     }
     sync_startup_menu(app);
 }
@@ -659,6 +723,8 @@ fn normalize_settings(mut settings: RpcSettings) -> RpcSettings {
     if settings.show_usage == Some(false) {
         settings.show_primary_usage = false;
         settings.show_weekly_usage = false;
+        settings.show_spark_primary_usage = false;
+        settings.show_spark_weekly_usage = false;
     }
     settings.show_usage = None;
 

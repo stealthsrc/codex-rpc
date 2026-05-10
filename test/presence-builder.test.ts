@@ -130,12 +130,40 @@ describe('buildPresence', () => {
           secondary: { usedPercent: 19, windowMinutes: 10080, resetsAt: null },
           creditsRemaining: 0,
           planType: 'pro',
+          sparkLimitId: null,
+          sparkLabel: null,
+          sparkPrimary: null,
+          sparkSecondary: null,
           lastActivityMs: Date.now(),
         },
       ),
     );
     expect(p?.state).toBe('GPT-5.5 · High · 5h 95% · week 81%');
     expect(p?.largeImageText).toBe('OpenAI Codex · 5h 95% · week 81%');
+  });
+
+  it('includes Spark limits in the image tooltip when present', () => {
+    const p = buildPresence(
+      mk(
+        'cli',
+        '2026-04-18T10:00:00Z',
+        { model: 'gpt-5.5', effort: 'high', serviceTier: null },
+        null,
+        {
+          limitId: 'codex',
+          primary: { usedPercent: 5, windowMinutes: 300, resetsAt: null },
+          secondary: { usedPercent: 19, windowMinutes: 10080, resetsAt: null },
+          creditsRemaining: 0,
+          planType: 'pro',
+          sparkLimitId: 'codex_bengalfox',
+          sparkLabel: 'GPT-5.3-Codex-Spark',
+          sparkPrimary: { usedPercent: 0, windowMinutes: 300, resetsAt: null },
+          sparkSecondary: { usedPercent: 0, windowMinutes: 10080, resetsAt: null },
+          lastActivityMs: Date.now(),
+        },
+      ),
+    );
+    expect(p?.largeImageText).toContain('Spark 5h');
   });
 
   it('adds optional RPC buttons only in TV mode', () => {
