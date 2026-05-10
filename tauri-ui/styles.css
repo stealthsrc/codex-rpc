@@ -135,6 +135,13 @@ h1 {
   -webkit-backdrop-filter: blur(8px);
 }
 
+.panel-note {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted, #94a3b8);
+  font-style: italic;
+}
+
 .grid {
   display: grid;
   grid-template-columns: 76px 130px 1fr;

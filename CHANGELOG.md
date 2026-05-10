@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.18] - 2026-05-10
+
+### Changed
+
+- Buttons panel and Watching-mode hint now flag the **Discord Nitro requirement** for custom RPC buttons to render on the user's profile.
+
 ## [0.3.17] - 2026-05-10
 
 ### Added
