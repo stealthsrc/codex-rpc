@@ -67,6 +67,8 @@ struct RpcSettings {
     show_effort: bool,
     #[serde(default = "default_show_usage")]
     show_credits: bool,
+    #[serde(default)]
+    always_on: bool,
 }
 
 impl Default for RpcSettings {
@@ -90,6 +92,7 @@ impl Default for RpcSettings {
             show_spark_weekly_usage: true,
             show_effort: true,
             show_credits: true,
+            always_on: false,
         }
     }
 }

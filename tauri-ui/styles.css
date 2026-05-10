@@ -202,6 +202,10 @@ button:disabled {
   gap: 8px;
 }
 
+.switch-row.single {
+  grid-template-columns: 1fr;
+}
+
 .switch-row button {
   min-width: 0;
 }

@@ -16,6 +16,7 @@ const fields = {
   usageSparkWeekToggle: document.querySelector('#usage-spark-week-toggle'),
   effortToggle: document.querySelector('#effort-toggle'),
   creditsToggle: document.querySelector('#credits-toggle'),
+  alwaysOnToggle: document.querySelector('#always-on-toggle'),
   status: document.querySelector('#status'),
   message: document.querySelector('#message'),
   previewActivity: document.querySelector('#preview-activity'),
@@ -45,6 +46,7 @@ function readForm() {
     show_spark_weekly_usage: fields.usageSparkWeekToggle.dataset.enabled === 'true',
     show_effort: fields.effortToggle.dataset.enabled === 'true',
     show_credits: fields.creditsToggle.dataset.enabled === 'true',
+    always_on: fields.alwaysOnToggle.dataset.enabled === 'true',
   };
 }
 
@@ -65,6 +67,7 @@ function writeForm(settings) {
   );
   syncUsageToggle(fields.effortToggle, settings.show_effort !== false, 'Effort');
   syncUsageToggle(fields.creditsToggle, !legacyHidden && settings.show_credits !== false, 'Credits');
+  syncAlwaysOnToggle(fields.alwaysOnToggle, settings.always_on === true);
   for (let i = 0; i < 2; i += 1) {
     fields.labels[i].value = settings.buttons?.[i]?.label || '';
     fields.urls[i].value = settings.buttons?.[i]?.url || '';
@@ -76,6 +79,13 @@ function writeForm(settings) {
 function syncUsageToggle(button, enabled, label) {
   button.dataset.enabled = String(enabled);
   button.textContent = `${label} ${enabled ? 'on' : 'off'}`;
+  button.classList.toggle('active', enabled);
+  button.setAttribute('aria-pressed', String(enabled));
+}
+
+function syncAlwaysOnToggle(button, enabled) {
+  button.dataset.enabled = String(enabled);
+  button.textContent = enabled ? 'On' : 'Off';
   button.classList.toggle('active', enabled);
   button.setAttribute('aria-pressed', String(enabled));
 }
@@ -162,6 +172,9 @@ function previewDetails(codex, mode) {
   }
   if (codex.includes('CLI')) {
     return isWatching ? 'Watching Codex CLI' : 'Coding with Codex CLI';
+  }
+  if (codex.includes('Monitoring')) {
+    return isWatching ? 'Watching Codex usage' : 'Monitoring Codex usage';
   }
   return 'No Codex activity';
 }
@@ -257,6 +270,10 @@ fields.effortToggle.addEventListener('click', () => {
 });
 fields.creditsToggle.addEventListener('click', () => {
   syncUsageToggle(fields.creditsToggle, fields.creditsToggle.dataset.enabled !== 'true', 'Credits');
+  scheduleSave();
+});
+fields.alwaysOnToggle.addEventListener('click', () => {
+  syncAlwaysOnToggle(fields.alwaysOnToggle, fields.alwaysOnToggle.dataset.enabled !== 'true');
   scheduleSave();
 });
 for (const input of [...fields.labels, ...fields.urls]) input.addEventListener('input', scheduleSave);

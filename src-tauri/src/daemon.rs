@@ -83,6 +83,8 @@ struct RpcSettings {
     show_effort: bool,
     #[serde(default = "default_show_usage")]
     show_credits: bool,
+    #[serde(default)]
+    always_on: bool,
 }
 
 impl Default for RpcSettings {
@@ -106,6 +108,7 @@ impl Default for RpcSettings {
             show_spark_weekly_usage: true,
             show_effort: true,
             show_credits: true,
+            always_on: false,
         }
     }
 }
@@ -120,6 +123,7 @@ enum PresenceState {
     Cli,
     App,
     Both,
+    Monitor,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,6 +247,7 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
         }
 
         let mut display_result = result.clone();
+        apply_always_on(&mut display_result, &settings);
         filter_usage(&mut display_result, &settings);
         write_status(
             &status_path,
@@ -296,7 +301,7 @@ fn detect(machine: &mut StateMachine, idle_grace_ms: u64) -> DetectionResult {
                 oldest = min_option(oldest, process.creation_date_ms);
             }
             PresenceState::Idle => counts.unknown += 1,
-            PresenceState::Both => {}
+            PresenceState::Both | PresenceState::Monitor => {}
         }
     }
 
@@ -676,9 +681,11 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
         (PresenceState::Cli, "watching") => "Watching Codex CLI",
         (PresenceState::App, "watching") => "Watching Codex",
         (PresenceState::Both, "watching") => "Watching Codex (CLI + Desktop)",
+        (PresenceState::Monitor, "watching") => "Watching Codex usage",
         (PresenceState::Cli, _) => "Coding with Codex CLI",
         (PresenceState::App, _) => "Using Codex",
         (PresenceState::Both, _) => "Coding with Codex (CLI + Desktop)",
+        (PresenceState::Monitor, _) => "Monitoring Codex usage",
         (PresenceState::Idle, _) => "",
     };
     if let Some(repo) = result
@@ -717,6 +724,7 @@ fn build_state_line(result: &DetectionResult) -> String {
             PresenceState::Cli => "Terminal session active".into(),
             PresenceState::App => "Desktop session".into(),
             PresenceState::Both => "CLI + Desktop".into(),
+            PresenceState::Monitor => "Tracking usage".into(),
             PresenceState::Idle => String::new(),
         }
     } else {
@@ -771,6 +779,7 @@ fn format_status_line(result: &DetectionResult, discord_user: Option<&str>) -> S
         PresenceState::Both => "Codex: CLI/Desktop",
         PresenceState::Cli => "Codex: CLI",
         PresenceState::App => "Codex: Desktop",
+        PresenceState::Monitor => "Codex: Monitoring",
         PresenceState::Idle => "Codex: Off",
     };
     let model = result
@@ -845,6 +854,13 @@ fn read_rpc_settings(path: &Path) -> RpcSettings {
         .take(2)
         .collect();
     settings
+}
+
+fn apply_always_on(result: &mut DetectionResult, settings: &RpcSettings) {
+    if settings.always_on && result.state == PresenceState::Idle {
+        result.state = PresenceState::Monitor;
+        result.started_at_ms = None;
+    }
 }
 
 fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
@@ -1754,6 +1770,7 @@ fn small_image_key(state: PresenceState) -> &'static str {
         PresenceState::Cli => "cli_badge",
         PresenceState::App => "app_badge",
         PresenceState::Both => "combo_badge",
+        PresenceState::Monitor => "codex_logo",
         PresenceState::Idle => "codex_logo",
     }
 }
@@ -1763,13 +1780,14 @@ fn small_image_text(state: PresenceState) -> &'static str {
         PresenceState::Cli => "Codex CLI",
         PresenceState::App => "Codex Desktop",
         PresenceState::Both => "CLI + Desktop",
+        PresenceState::Monitor => "Monitoring",
         PresenceState::Idle => "Codex",
     }
 }
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
     format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         result.state,
         result.started_at_ms,
         result
@@ -1795,6 +1813,7 @@ fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
         settings.show_spark_weekly_usage,
         settings.show_effort,
         settings.show_credits,
+        settings.always_on,
         settings
             .buttons
             .iter()

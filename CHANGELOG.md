@@ -2,6 +2,12 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.17] - 2026-05-10
+
+### Added
+
+- **Always-on mode**: a new `Always on` toggle in Settings keeps Discord RPC active and rate-limit counters refreshing even when no `codex.exe` is running locally. Useful for third-party agents (Hermes Agent, etc.) that draw from your shared agentic usage limit. Discord shows `Monitoring Codex usage` / `Watching Codex usage` (in TV mode) with the configured model and live rate limits. Tauri only — the standalone Node CLI build is unchanged.
+
 ## [0.3.16] - 2026-05-10
 
 ### Added
