@@ -10,6 +10,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread,
+    time::Duration,
 };
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -34,14 +36,10 @@ struct DaemonState {
 
 #[derive(Default)]
 struct TrayMenuState {
-    mode_watching: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_playing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_listening: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    show_5h: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    show_week: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    show_spark_5h: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    show_spark_week: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    usage_5h: Mutex<Option<MenuItem<tauri::Wry>>>,
+    usage_week: Mutex<Option<MenuItem<tauri::Wry>>>,
+    usage_spark_5h: Mutex<Option<MenuItem<tauri::Wry>>>,
+    usage_spark_week: Mutex<Option<MenuItem<tauri::Wry>>>,
     startup: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
@@ -121,10 +119,9 @@ fn load_settings() -> Result<RpcSettings, String> {
 }
 
 #[tauri::command]
-fn save_settings(app: tauri::AppHandle, settings: RpcSettings) -> Result<(), String> {
+fn save_settings(_app: tauri::AppHandle, settings: RpcSettings) -> Result<(), String> {
     let settings = normalize_settings(settings);
     write_settings(&settings)?;
-    sync_tray_menu(&app, &settings);
     Ok(())
 }
 
@@ -184,6 +181,7 @@ fn main() {
             let state = app.state::<DaemonState>();
             start_daemon_inner(&handle, &state);
             create_tray(app)?;
+            spawn_usage_refresh_thread(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -203,70 +201,16 @@ fn keep_window_in_tray(app: &mut tauri::App) {
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let settings = load_settings().unwrap_or_default();
     let show_item = MenuItem::with_id(app, "show", "Settings", true, None::<&str>)?;
-    let mode_watching_item = CheckMenuItem::with_id(
+    let usage_5h_item = MenuItem::with_id(app, "usage_5h", "5h: —", false, None::<&str>)?;
+    let usage_week_item = MenuItem::with_id(app, "usage_week", "Week: —", false, None::<&str>)?;
+    let usage_spark_5h_item =
+        MenuItem::with_id(app, "usage_spark_5h", "Spark 5h: —", false, None::<&str>)?;
+    let usage_spark_week_item = MenuItem::with_id(
         app,
-        "mode_watching",
-        "Mode: Watching",
-        true,
-        settings.mode == "watching",
-        None::<&str>,
-    )?;
-    let mode_playing_item = CheckMenuItem::with_id(
-        app,
-        "mode_playing",
-        "Mode: Playing",
-        true,
-        settings.mode == "playing",
-        None::<&str>,
-    )?;
-    let mode_listening_item = CheckMenuItem::with_id(
-        app,
-        "mode_listening",
-        "Mode: Listening",
-        true,
-        settings.mode == "listening",
-        None::<&str>,
-    )?;
-    let mode_competing_item = CheckMenuItem::with_id(
-        app,
-        "mode_competing",
-        "Mode: Competing",
-        true,
-        settings.mode == "competing",
-        None::<&str>,
-    )?;
-    let show_5h_item = CheckMenuItem::with_id(
-        app,
-        "show_5h",
-        "Show 5h usage",
-        true,
-        settings.show_primary_usage,
-        None::<&str>,
-    )?;
-    let show_week_item = CheckMenuItem::with_id(
-        app,
-        "show_week",
-        "Show week usage",
-        true,
-        settings.show_weekly_usage,
-        None::<&str>,
-    )?;
-    let show_spark_5h_item = CheckMenuItem::with_id(
-        app,
-        "show_spark_5h",
-        "Show Spark 5h usage",
-        true,
-        settings.show_spark_primary_usage,
-        None::<&str>,
-    )?;
-    let show_spark_week_item = CheckMenuItem::with_id(
-        app,
-        "show_spark_week",
-        "Show Spark week usage",
-        true,
-        settings.show_spark_weekly_usage,
+        "usage_spark_week",
+        "Spark week: —",
+        false,
         None::<&str>,
     )?;
     let startup_item = CheckMenuItem::with_id(
@@ -285,14 +229,10 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         &[
             &show_item,
             &separator_1,
-            &mode_watching_item,
-            &mode_playing_item,
-            &mode_listening_item,
-            &mode_competing_item,
-            &show_5h_item,
-            &show_week_item,
-            &show_spark_5h_item,
-            &show_spark_week_item,
+            &usage_5h_item,
+            &usage_week_item,
+            &usage_spark_5h_item,
+            &usage_spark_week_item,
             &startup_item,
             &separator_2,
             &quit_item,
@@ -300,35 +240,19 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     )?;
 
     let tray_state = app.state::<TrayMenuState>();
+    *tray_state.usage_5h.lock().expect("tray menu mutex poisoned") = Some(usage_5h_item.clone());
     *tray_state
-        .mode_watching
+        .usage_week
         .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_watching_item.clone());
+        .expect("tray menu mutex poisoned") = Some(usage_week_item.clone());
     *tray_state
-        .mode_playing
+        .usage_spark_5h
         .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_playing_item.clone());
+        .expect("tray menu mutex poisoned") = Some(usage_spark_5h_item.clone());
     *tray_state
-        .mode_listening
+        .usage_spark_week
         .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_listening_item.clone());
-    *tray_state
-        .mode_competing
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_competing_item.clone());
-    *tray_state.show_5h.lock().expect("tray menu mutex poisoned") = Some(show_5h_item.clone());
-    *tray_state
-        .show_week
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(show_week_item.clone());
-    *tray_state
-        .show_spark_5h
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(show_spark_5h_item.clone());
-    *tray_state
-        .show_spark_week
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(show_spark_week_item.clone());
+        .expect("tray menu mutex poisoned") = Some(usage_spark_week_item.clone());
     *tray_state.startup.lock().expect("tray menu mutex poisoned") = Some(startup_item.clone());
 
     TrayIconBuilder::new()
@@ -338,57 +262,6 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => show_settings(app),
-            "mode_watching" => {
-                if let Ok(settings) = update_settings(|settings| settings.mode = "watching".into())
-                {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "mode_playing" => {
-                if let Ok(settings) = update_settings(|settings| settings.mode = "playing".into()) {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "mode_listening" => {
-                if let Ok(settings) = update_settings(|settings| settings.mode = "listening".into())
-                {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "mode_competing" => {
-                if let Ok(settings) = update_settings(|settings| settings.mode = "competing".into())
-                {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "show_5h" => {
-                if let Ok(settings) = update_settings(|settings| {
-                    settings.show_primary_usage = !settings.show_primary_usage
-                }) {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "show_week" => {
-                if let Ok(settings) = update_settings(|settings| {
-                    settings.show_weekly_usage = !settings.show_weekly_usage
-                }) {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "show_spark_5h" => {
-                if let Ok(settings) = update_settings(|settings| {
-                    settings.show_spark_primary_usage = !settings.show_spark_primary_usage
-                }) {
-                    sync_tray_menu(app, &settings);
-                }
-            }
-            "show_spark_week" => {
-                if let Ok(settings) = update_settings(|settings| {
-                    settings.show_spark_weekly_usage = !settings.show_spark_weekly_usage
-                }) {
-                    sync_tray_menu(app, &settings);
-                }
-            }
             "startup" => {
                 let _ = set_startup_enabled(!startup_enabled());
                 sync_startup_menu(app);
@@ -415,74 +288,103 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn sync_tray_menu(app: &tauri::AppHandle, settings: &RpcSettings) {
+fn spawn_usage_refresh_thread(handle: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut last_line = String::new();
+        loop {
+            let line = status_path()
+                .ok()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .map(|raw| raw.trim().to_string())
+                .unwrap_or_default();
+            if line != last_line {
+                last_line.clone_from(&line);
+                sync_usage_menu(&handle, &line);
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
+}
+
+fn sync_usage_menu(app: &tauri::AppHandle, status_line: &str) {
+    let labels = parse_status_usage(status_line);
     let state = app.state::<TrayMenuState>();
-    let mode_watching = state
-        .mode_watching
+    let usage_5h = state.usage_5h.lock().expect("tray menu mutex poisoned").clone();
+    let usage_week = state.usage_week.lock().expect("tray menu mutex poisoned").clone();
+    let usage_spark_5h = state
+        .usage_spark_5h
         .lock()
         .expect("tray menu mutex poisoned")
         .clone();
-    let mode_playing = state
-        .mode_playing
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let mode_listening = state
-        .mode_listening
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let mode_competing = state
-        .mode_competing
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let show_5h = state
-        .show_5h
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let show_week = state
-        .show_week
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let show_spark_5h = state
-        .show_spark_5h
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let show_spark_week = state
-        .show_spark_week
+    let usage_spark_week = state
+        .usage_spark_week
         .lock()
         .expect("tray menu mutex poisoned")
         .clone();
 
-    if let Some(item) = mode_watching {
-        let _ = item.set_checked(settings.mode == "watching");
+    if let Some(item) = usage_5h {
+        let _ = item.set_text(format!("5h: {}", labels.primary.as_deref().unwrap_or("—")));
     }
-    if let Some(item) = mode_playing {
-        let _ = item.set_checked(settings.mode == "playing");
+    if let Some(item) = usage_week {
+        let _ = item.set_text(format!("Week: {}", labels.secondary.as_deref().unwrap_or("—")));
     }
-    if let Some(item) = mode_listening {
-        let _ = item.set_checked(settings.mode == "listening");
+    if let Some(item) = usage_spark_5h {
+        let _ = item.set_text(format!(
+            "Spark 5h: {}",
+            labels.spark_primary.as_deref().unwrap_or("—")
+        ));
     }
-    if let Some(item) = mode_competing {
-        let _ = item.set_checked(settings.mode == "competing");
+    if let Some(item) = usage_spark_week {
+        let _ = item.set_text(format!(
+            "Spark week: {}",
+            labels.spark_secondary.as_deref().unwrap_or("—")
+        ));
     }
-    if let Some(item) = show_5h {
-        let _ = item.set_checked(settings.show_primary_usage);
+}
+
+#[derive(Default)]
+struct UsageLabels {
+    primary: Option<String>,
+    secondary: Option<String>,
+    spark_primary: Option<String>,
+    spark_secondary: Option<String>,
+}
+
+fn parse_status_usage(status_line: &str) -> UsageLabels {
+    // Status line format: "{state}|{model}|{usage}|{discord}" where {usage}
+    // is "Usage: 5h X% left / week Y% left / Spark 5h Z% left / Spark week W% left / credits N".
+    let mut labels = UsageLabels::default();
+    let usage_field = match status_line.split('|').nth(2) {
+        Some(field) if !field.trim().is_empty() => field.trim().to_string(),
+        _ => return labels,
+    };
+    let body = usage_field
+        .strip_prefix("Usage:")
+        .map(str::trim)
+        .unwrap_or(usage_field.as_str());
+    for raw in body.split('/') {
+        let part = raw.trim();
+        let lower = part.to_ascii_lowercase();
+        let value = part
+            .trim_end_matches(|ch: char| ch.is_ascii_alphabetic() || ch.is_whitespace())
+            .rsplit(' ')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if lower.starts_with("spark 5h") {
+            labels.spark_primary = Some(value);
+        } else if lower.starts_with("spark week") || lower.starts_with("spark wk") {
+            labels.spark_secondary = Some(value);
+        } else if lower.starts_with("5h") {
+            labels.primary = Some(value);
+        } else if lower.starts_with("week") {
+            labels.secondary = Some(value);
+        }
     }
-    if let Some(item) = show_week {
-        let _ = item.set_checked(settings.show_weekly_usage);
-    }
-    if let Some(item) = show_spark_5h {
-        let _ = item.set_checked(settings.show_spark_primary_usage);
-    }
-    if let Some(item) = show_spark_week {
-        let _ = item.set_checked(settings.show_spark_weekly_usage);
-    }
-    sync_startup_menu(app);
+    labels
 }
 
 fn sync_startup_menu(app: &tauri::AppHandle) {
@@ -628,17 +530,6 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
-}
-
-fn update_settings<F>(mutator: F) -> Result<RpcSettings, String>
-where
-    F: FnOnce(&mut RpcSettings),
-{
-    let mut settings = load_settings()?;
-    mutator(&mut settings);
-    let settings = normalize_settings(settings);
-    write_settings(&settings)?;
-    Ok(settings)
 }
 
 fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {

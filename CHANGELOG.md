@@ -2,6 +2,13 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.3.15] - 2026-05-10
+
+### Changed
+
+- Tray menu trimmed to **Settings · 5h · Week · Spark 5h · Spark week · Start on Windows · Quit**. Mode selectors and per-toggle visibility items are now configured exclusively from the Settings window.
+- The four rate-limit entries are read-only (greyed out) and refresh every ~2s with the live "remaining" percentage parsed from the daemon status file. Mode and Discord usage filters remain unchanged in Settings.
+
 ## [0.3.14] - 2026-05-10
 
 ### Added
