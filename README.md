@@ -38,7 +38,7 @@
 
 Download the latest release:
 
-https://github.com/StealthyLabsHQ/codex-rpc/releases/latest
+https://github.com/stealthsrc/codex-rpc/releases/latest
 
 Recommended asset:
 

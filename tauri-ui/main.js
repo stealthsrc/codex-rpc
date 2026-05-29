@@ -3,7 +3,7 @@ const invoke = window.__TAURI__.core.invoke;
 const presets = {
   codex: ['Open Codex', 'https://chatgpt.com/codex'],
   usage: ['Usage', 'https://chatgpt.com/codex/settings/analytics'],
-  repo: ['GitHub repo', 'https://github.com/StealthyLabsHQ/codex-rpc'],
+  repo: ['GitHub repo', 'https://github.com/stealthsrc/codex-rpc'],
 };
 
 const fields = {

@@ -384,7 +384,7 @@ function Show-RpcButtonsDialog {
   $presetGithub.Location = New-Object System.Drawing.Point(254, 24)
   $presetGithub.Size = New-Object System.Drawing.Size(110, 25)
   Set-DarkButton $presetGithub
-  $presetGithub.Add_Click({ Set-PresetButton 'GitHub repo' 'https://github.com/StealthyLabsHQ/codex-rpc' })
+  $presetGithub.Add_Click({ Set-PresetButton 'GitHub repo' 'https://github.com/stealthsrc/codex-rpc' })
 
   [void] $presetsGroup.Controls.AddRange(@($presetCodex, $presetUsage, $presetGithub))
 
