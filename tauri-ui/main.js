@@ -101,6 +101,7 @@ function syncButtons() {
 async function load() {
   try {
     applyTheme(localStorage.getItem('codex-rpc-theme') || 'dark');
+    initCollapsible();
     await invoke('start_daemon');
     writeForm(await invoke('load_settings'));
     const status = await invoke('load_status');
@@ -110,6 +111,26 @@ async function load() {
     fields.message.textContent = String(error);
     loading = false;
   }
+}
+
+function initCollapsible() {
+  document.querySelectorAll('.panel').forEach((panel) => {
+    const legend = panel.querySelector('.legend');
+    if (!legend) return;
+    if (!panel.querySelector('.chevron')) return;
+
+    const panelId = legend.textContent.trim().toLowerCase();
+
+    legend.addEventListener('click', () => {
+      panel.classList.toggle('collapsed');
+      localStorage.setItem(`panel-collapsed-${panelId}`, panel.classList.contains('collapsed'));
+    });
+
+    const isCollapsed = localStorage.getItem(`panel-collapsed-${panelId}`) === 'true';
+    if (isCollapsed) {
+      panel.classList.add('collapsed');
+    }
+  });
 }
 
 function formatStatus(value) {
@@ -206,6 +227,8 @@ function truncateText(value, maxLength) {
 function setStatus(value) {
   lastStatusLine = value || 'Codex: Off';
   fields.status.textContent = formatStatus(lastStatusLine);
+  const isActive = lastStatusLine && !lastStatusLine.includes('Codex: Off');
+  fields.status.classList.toggle('active', isActive);
   updatePreview();
 }
 
