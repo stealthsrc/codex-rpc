@@ -66,7 +66,17 @@ struct RpcSettings {
     #[serde(default = "default_show_usage")]
     show_effort: bool,
     #[serde(default = "default_show_usage")]
+    show_fast_mode: bool,
+    #[serde(default = "default_show_usage")]
     show_credits: bool,
+    #[serde(default)]
+    show_cost: bool,
+    #[serde(default)]
+    show_cost_total: bool,
+    #[serde(default)]
+    show_project_tokens: bool,
+    #[serde(default)]
+    show_all_tokens: bool,
     #[serde(default)]
     always_on: bool,
 }
@@ -91,7 +101,12 @@ impl Default for RpcSettings {
             show_spark_primary_usage: true,
             show_spark_weekly_usage: true,
             show_effort: true,
+            show_fast_mode: true,
             show_credits: true,
+            show_cost: false,
+            show_cost_total: false,
+            show_project_tokens: false,
+            show_all_tokens: false,
             always_on: false,
         }
     }
@@ -249,7 +264,10 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     )?;
 
     let tray_state = app.state::<TrayMenuState>();
-    *tray_state.usage_5h.lock().expect("tray menu mutex poisoned") = Some(usage_5h_item.clone());
+    *tray_state
+        .usage_5h
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(usage_5h_item.clone());
     *tray_state
         .usage_week
         .lock()
@@ -318,8 +336,16 @@ fn spawn_usage_refresh_thread(handle: tauri::AppHandle) {
 fn sync_usage_menu(app: &tauri::AppHandle, status_line: &str) {
     let labels = parse_status_usage(status_line);
     let state = app.state::<TrayMenuState>();
-    let usage_5h = state.usage_5h.lock().expect("tray menu mutex poisoned").clone();
-    let usage_week = state.usage_week.lock().expect("tray menu mutex poisoned").clone();
+    let usage_5h = state
+        .usage_5h
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
+    let usage_week = state
+        .usage_week
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone();
     let usage_spark_5h = state
         .usage_spark_5h
         .lock()
@@ -335,7 +361,10 @@ fn sync_usage_menu(app: &tauri::AppHandle, status_line: &str) {
         let _ = item.set_text(format!("5h: {}", labels.primary.as_deref().unwrap_or("—")));
     }
     if let Some(item) = usage_week {
-        let _ = item.set_text(format!("Week: {}", labels.secondary.as_deref().unwrap_or("—")));
+        let _ = item.set_text(format!(
+            "Week: {}",
+            labels.secondary.as_deref().unwrap_or("—")
+        ));
     }
     if let Some(item) = usage_spark_5h {
         let _ = item.set_text(format!(
@@ -514,8 +543,8 @@ fn reg_command() -> std::process::Command {
     use std::ffi::OsString;
     use std::os::windows::process::CommandExt;
 
-    let system_root = std::env::var_os("SystemRoot")
-        .unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
     let reg_path = Path::new(&system_root).join("System32").join("reg.exe");
     let mut command = std::process::Command::new(reg_path);
     command.creation_flags(0x08000000);

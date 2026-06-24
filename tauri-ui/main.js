@@ -1,4 +1,5 @@
 const invoke = window.__TAURI__.core.invoke;
+const appWindow = window.__TAURI__.window.getCurrentWindow();
 
 const presets = {
   codex: ['Open Codex', 'https://chatgpt.com/codex'],
@@ -15,7 +16,12 @@ const fields = {
   usageSpark5hToggle: document.querySelector('#usage-spark-5h-toggle'),
   usageSparkWeekToggle: document.querySelector('#usage-spark-week-toggle'),
   effortToggle: document.querySelector('#effort-toggle'),
+  fastModeToggle: document.querySelector('#fast-mode-toggle'),
   creditsToggle: document.querySelector('#credits-toggle'),
+  costToggle: document.querySelector('#cost-toggle'),
+  costTotalToggle: document.querySelector('#cost-total-toggle'),
+  projectTokensToggle: document.querySelector('#project-tokens-toggle'),
+  allTokensToggle: document.querySelector('#all-tokens-toggle'),
   alwaysOnToggle: document.querySelector('#always-on-toggle'),
   status: document.querySelector('#status'),
   message: document.querySelector('#message'),
@@ -45,7 +51,12 @@ function readForm() {
     show_spark_primary_usage: fields.usageSpark5hToggle.dataset.enabled === 'true',
     show_spark_weekly_usage: fields.usageSparkWeekToggle.dataset.enabled === 'true',
     show_effort: fields.effortToggle.dataset.enabled === 'true',
+    show_fast_mode: fields.fastModeToggle.dataset.enabled === 'true',
     show_credits: fields.creditsToggle.dataset.enabled === 'true',
+    show_cost: fields.costToggle.dataset.enabled === 'true',
+    show_cost_total: fields.costTotalToggle.dataset.enabled === 'true',
+    show_project_tokens: fields.projectTokensToggle.dataset.enabled === 'true',
+    show_all_tokens: fields.allTokensToggle.dataset.enabled === 'true',
     always_on: fields.alwaysOnToggle.dataset.enabled === 'true',
   };
 }
@@ -63,10 +74,18 @@ function writeForm(settings) {
   syncUsageToggle(
     fields.usageSparkWeekToggle,
     !legacyHidden && settings.show_spark_weekly_usage !== false,
-    'Spark wk',
+    'Spark week',
   );
   syncUsageToggle(fields.effortToggle, settings.show_effort !== false, 'Effort');
+  syncUsageToggle(fields.fastModeToggle, settings.show_fast_mode !== false, 'Fast mode');
   syncUsageToggle(fields.creditsToggle, !legacyHidden && settings.show_credits !== false, 'Credits');
+  // Enforce the XOR pairing on load (project wins if a legacy config has both on).
+  const showCost = settings.show_cost === true;
+  const showProjectTokens = settings.show_project_tokens === true;
+  syncUsageToggle(fields.costToggle, showCost, 'Project cost');
+  syncUsageToggle(fields.costTotalToggle, settings.show_cost_total === true && !showCost, 'All cost');
+  syncUsageToggle(fields.projectTokensToggle, showProjectTokens, 'Project tokens');
+  syncUsageToggle(fields.allTokensToggle, settings.show_all_tokens === true && !showProjectTokens, 'All tokens');
   syncAlwaysOnToggle(fields.alwaysOnToggle, settings.always_on === true);
   for (let i = 0; i < 2; i += 1) {
     fields.labels[i].value = settings.buttons?.[i]?.label || '';
@@ -88,6 +107,15 @@ function syncAlwaysOnToggle(button, enabled) {
   button.textContent = enabled ? 'On' : 'Off';
   button.classList.toggle('active', enabled);
   button.setAttribute('aria-pressed', String(enabled));
+}
+
+// Cost/Tokens come in mutually-exclusive pairs (project XOR total): enabling one
+// disables its partner so the Discord line shows a single value.
+function toggleCostOption(button, label, partner, partnerLabel) {
+  const enabled = button.dataset.enabled !== 'true';
+  syncUsageToggle(button, enabled, label);
+  if (enabled) syncUsageToggle(partner, false, partnerLabel);
+  scheduleSave();
 }
 
 function syncButtons() {
@@ -138,10 +166,10 @@ function formatStatus(value) {
 }
 
 function parseStatus(value) {
-  const [codex = 'Codex: Off', model = '', usage = '', discord = ''] = (value || 'Codex: Off')
+  const [codex = 'Codex: Off', model = '', usage = '', discord = '', cost = ''] = (value || 'Codex: Off')
     .split('|')
     .map((part) => part.trim());
-  return { codex, model, usage, discord };
+  return { codex, model, usage, discord, cost };
 }
 
 function updatePreview() {
@@ -157,6 +185,15 @@ function updatePreview() {
   const modelPart = previewModel(status.model, settings);
   const usageParts = previewUsageParts(status.usage, settings);
   const stateParts = [modelPart, ...usageParts].filter(Boolean);
+  const costEnabled =
+    settings.show_cost ||
+    settings.show_cost_total ||
+    settings.show_project_tokens ||
+    settings.show_all_tokens;
+  if (costEnabled && status.cost) {
+    const costText = status.cost.replace(/^Cost:\s*/i, '').trim();
+    if (costText) stateParts.push(costText);
+  }
 
   fields.previewActivity.textContent = activity;
   fields.previewDetails.textContent = previewDetails(status.codex, mode);
@@ -166,10 +203,21 @@ function updatePreview() {
 
 function previewModel(model, settings) {
   if (!model) return '';
-  if (settings.show_effort) return model;
-  // model line format: "Model - Effort". Drop everything after the first " - " when effort hidden.
-  const idx = model.indexOf(' - ');
-  return idx === -1 ? model : model.slice(0, idx);
+  const parts = model.split(' - ').filter(Boolean);
+  if (parts.length <= 1) return model;
+  return parts
+    .filter((part, index) => {
+      if (index === 0) return true;
+      const lower = part.toLowerCase();
+      if (['minimal', 'low', 'medium', 'high', 'extra high'].includes(lower)) {
+        return settings.show_effort;
+      }
+      if (lower === 'fast' || lower === 'standard') {
+        return settings.show_fast_mode;
+      }
+      return true;
+    })
+    .join(' - ');
 }
 
 function renderPreviewButtons(mode, buttons) {
@@ -252,6 +300,9 @@ function scheduleSave() {
 
 document.querySelector('#apply').addEventListener('click', () => save());
 document.querySelector('#close').addEventListener('click', () => invoke('close_settings'));
+document.querySelector('#titlebar-minimize').addEventListener('click', () => appWindow.minimize());
+document.querySelector('#titlebar-maximize').addEventListener('click', () => appWindow.toggleMaximize());
+document.querySelector('#titlebar-close').addEventListener('click', () => invoke('close_settings'));
 fields.themeButtons.forEach((button) => {
   button.addEventListener('click', () => applyTheme(button.dataset.themeOption));
 });
@@ -283,7 +334,7 @@ fields.usageSparkWeekToggle.addEventListener('click', () => {
   syncUsageToggle(
     fields.usageSparkWeekToggle,
     fields.usageSparkWeekToggle.dataset.enabled !== 'true',
-    'Spark wk',
+    'Spark week',
   );
   scheduleSave();
 });
@@ -291,10 +342,22 @@ fields.effortToggle.addEventListener('click', () => {
   syncUsageToggle(fields.effortToggle, fields.effortToggle.dataset.enabled !== 'true', 'Effort');
   scheduleSave();
 });
+fields.fastModeToggle.addEventListener('click', () => {
+  syncUsageToggle(fields.fastModeToggle, fields.fastModeToggle.dataset.enabled !== 'true', 'Fast mode');
+  scheduleSave();
+});
 fields.creditsToggle.addEventListener('click', () => {
   syncUsageToggle(fields.creditsToggle, fields.creditsToggle.dataset.enabled !== 'true', 'Credits');
   scheduleSave();
 });
+fields.costToggle.addEventListener('click', () =>
+  toggleCostOption(fields.costToggle, 'Project cost', fields.costTotalToggle, 'All cost'));
+fields.costTotalToggle.addEventListener('click', () =>
+  toggleCostOption(fields.costTotalToggle, 'All cost', fields.costToggle, 'Project cost'));
+fields.projectTokensToggle.addEventListener('click', () =>
+  toggleCostOption(fields.projectTokensToggle, 'Project tokens', fields.allTokensToggle, 'All tokens'));
+fields.allTokensToggle.addEventListener('click', () =>
+  toggleCostOption(fields.allTokensToggle, 'All tokens', fields.projectTokensToggle, 'Project tokens'));
 fields.alwaysOnToggle.addEventListener('click', () => {
   syncAlwaysOnToggle(fields.alwaysOnToggle, fields.alwaysOnToggle.dataset.enabled !== 'true');
   scheduleSave();
@@ -318,7 +381,7 @@ setInterval(async () => {
   } catch {
     setStatus('Codex: Off');
   }
-}, 1000);
+}, 250);
 
 function applyTheme(theme) {
   const safeTheme = ['dark', 'system', 'light'].includes(theme) ? theme : 'dark';

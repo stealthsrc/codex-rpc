@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Codex RPC Settings</title>
+    <title>Codex RPC</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -11,10 +11,24 @@
     <script defer src="./main.js"></script>
   </head>
   <body>
+    <div class="titlebar" data-tauri-drag-region>
+      <img class="titlebar-logo" src="./codex_logo.png" alt="" />
+      <div class="titlebar-controls">
+        <button type="button" class="titlebar-button" id="titlebar-minimize" aria-label="Minimize" title="Minimize">
+          <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1" y1="5.5" x2="10" y2="5.5" stroke="currentColor" stroke-width="1" /></svg>
+        </button>
+        <button type="button" class="titlebar-button" id="titlebar-maximize" aria-label="Maximize" title="Maximize">
+          <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><rect x="1.5" y="1.5" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1" /></svg>
+        </button>
+        <button type="button" class="titlebar-button close" id="titlebar-close" aria-label="Close" title="Close">
+          <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1.5" y1="1.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1" /><line x1="9.5" y1="1.5" x2="1.5" y2="9.5" stroke="currentColor" stroke-width="1" /></svg>
+        </button>
+      </div>
+    </div>
     <main class="shell">
       <header class="topbar">
         <div class="title-row">
-          <h1>Codex RPC Settings</h1>
+          <h1>Codex RPC</h1>
           <div class="theme-switch" aria-label="Theme">
             <button type="button" data-theme-option="dark">Dark</button>
             <button type="button" data-theme-option="system">System</button>
@@ -84,7 +98,7 @@
                 <button type="button" id="usage-5h-toggle" class="toggle" aria-pressed="true">5h on</button>
                 <button type="button" id="usage-week-toggle" class="toggle" aria-pressed="true">Week on</button>
                 <button type="button" id="usage-spark-5h-toggle" class="toggle" aria-pressed="true">Spark 5h on</button>
-                <button type="button" id="usage-spark-week-toggle" class="toggle" aria-pressed="true">Spark wk on</button>
+                <button type="button" id="usage-spark-week-toggle" class="toggle" aria-pressed="true" title="Show Spark weekly usage">Spark week on</button>
               </div>
             </div>
           </div>
@@ -97,7 +111,23 @@
             <div class="setting-control">
               <div class="switch-row">
                 <button type="button" id="effort-toggle" class="toggle" aria-pressed="true">Effort on</button>
+                <button type="button" id="fast-mode-toggle" class="toggle" aria-pressed="true" title="Show Fast or Standard speed in Discord RPC">Fast mode on</button>
                 <button type="button" id="credits-toggle" class="toggle" aria-pressed="true">Credits on</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <label>Cost &amp; tokens</label>
+              <p>Estimated spend and token counts for the current project or all projects. Off by default.</p>
+            </div>
+            <div class="setting-control">
+              <div class="switch-row">
+                <button type="button" id="cost-toggle" class="toggle" aria-pressed="false" title="Show estimated spend for the current project">Project cost off</button>
+                <button type="button" id="cost-total-toggle" class="toggle" aria-pressed="false" title="Show estimated spend across all projects">All cost off</button>
+                <button type="button" id="project-tokens-toggle" class="toggle" aria-pressed="false" title="Show token counts for the current project">Project tokens off</button>
+                <button type="button" id="all-tokens-toggle" class="toggle" aria-pressed="false" title="Show token counts across all projects">All tokens off</button>
               </div>
             </div>
           </div>

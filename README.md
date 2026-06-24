@@ -6,8 +6,9 @@
 
 <p align="center">
   Windows and macOS tray Discord Rich Presence for OpenAI Codex.
-  Detects Codex CLI and Codex desktop, shows model/effort, and lets you control
-  Discord activity from a local Tauri settings window.
+  Detects Codex CLI, editor-launched Codex sessions, and Codex desktop, shows
+  model/effort/Fast mode, and lets you control Discord activity from a local
+  Tauri settings window.
 </p>
 
 <p align="center">
@@ -27,10 +28,12 @@
 - Detects Codex CLI vs Codex desktop.
 - Discord RPC modes: Playing, Watching, Listening, Competing.
 - Discord buttons support in Watching mode.
-- Optional 5h and weekly usage display toggles.
+- Optional 5h, weekly, Spark 5h, Spark weekly, credits, cost, and token display toggles.
+- Fast mode display when Codex is running with `service_tier = "fast"`.
+- Always-on mode for monitoring usage when no local Codex process is running.
 - Live autosave for settings.
 - Local preview of the Discord activity, including button preview.
-- Tray quick toggles for RPC mode and usage visibility.
+- Tray usage summary and start-at-login toggle.
 - Dark, System, and Light themes.
 - Resizable settings window.
 
@@ -42,8 +45,8 @@ https://github.com/stealthsrc/codex-rpc/releases/latest
 
 Recommended asset:
 
-- `Codex RPC_0.3.4_x64-setup.exe`
-- `Codex RPC_0.3.4_aarch64.dmg` or `Codex RPC_0.3.4_x64.dmg` on macOS
+- `Codex RPC_0.3.21_x64-setup.exe`
+- `Codex RPC_0.3.21_aarch64.dmg` or `Codex RPC_0.3.21_x64.dmg` on macOS
 
 Portable asset:
 
@@ -59,20 +62,25 @@ The settings window controls:
 
 - RPC mode: Playing, Watching, Listening, Competing.
 - Two optional Discord buttons. Buttons are sent only in Watching mode.
-- 5h usage visibility.
-- Weekly usage visibility.
+- 5h, weekly, Spark 5h, Spark weekly, and credits visibility.
+- Current-project and all-projects cost/token visibility.
+- Always-on monitoring when no Codex process is running.
 - Theme.
 
 The tray menu controls:
 
 - Open settings.
-- Mode: Watching.
-- Mode: Playing.
-- Mode: Listening.
-- Mode: Competing.
-- Show 5h usage.
-- Show week usage.
+- Live 5h, weekly, Spark 5h, and Spark weekly usage.
+- Start on Windows.
 - Quit.
+
+## Runtime Paths
+
+The Tauri app is the primary shipped app. It runs the tray, process scanner,
+settings window, and Discord IPC in one Rust/Tauri process.
+
+The Node entrypoint under `src/` is kept for legacy CLI/dev workflows and tests.
+It does not carry every Tauri-only settings surface.
 
 Settings are saved under:
 
@@ -111,7 +119,9 @@ Everything else with a valid Codex executable path is treated as Codex desktop.
 Codex RPC reads local Codex files only:
 
 - `~\.codex\config.toml` for model and reasoning effort.
-- `~\.codex\sessions\**\rollout-*.jsonl` for repo name and usage snapshots.
+- `~\.codex\config.toml` for Fast mode via `service_tier = "fast"`.
+- `~\.codex\sessions\**\rollout-*.jsonl` for repo name, active turn context,
+  usage snapshots, and cost/token estimates.
 
 No Codex data is sent anywhere except the Discord Rich Presence payload through
 the local Discord IPC pipe.
@@ -163,7 +173,7 @@ Outputs:
 
 ```text
 bin\codex-rich-presence.exe
-src-tauri\target\release\bundle\nsis\Codex RPC_0.3.4_x64-setup.exe
+src-tauri\target\release\bundle\nsis\Codex RPC_0.3.21_x64-setup.exe
 ```
 
 Build macOS app:
@@ -177,7 +187,7 @@ Outputs:
 ```text
 bin/codex-rich-presence-macos-arm64
 src-tauri/target/release/bundle/macos/Codex RPC.app
-src-tauri/target/release/bundle/dmg/Codex RPC_0.3.4_aarch64.dmg
+src-tauri/target/release/bundle/dmg/Codex RPC_0.3.21_aarch64.dmg
 ```
 
 ## Security

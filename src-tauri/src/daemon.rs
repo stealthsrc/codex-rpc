@@ -41,10 +41,16 @@ use windows::{
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1494452015504293908";
 const SCAN_INTERVAL_MS: u64 = 5000;
 const UI_REFRESH_INTERVAL_MS: u64 = 500;
+const CODEX_METADATA_REFRESH_MS: u64 = 250;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const LOCAL_USAGE_REFRESH_MS: u64 = 60_000;
 const ACCOUNT_USAGE_CACHE_MS: u64 = 30_000;
+// OpenAI bills cached input at a flat 0.1x of the model's input rate and never
+// charges for cache writes (unlike Claude's 1.25x/2x write tiers).
+const CACHED_INPUT_MULT: f64 = 0.1;
+// Re-walking every rollout to total lifetime spend is the expensive path; gate it.
+const COST_REFRESH_MS: u64 = 30_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
@@ -82,7 +88,17 @@ struct RpcSettings {
     #[serde(default = "default_show_usage")]
     show_effort: bool,
     #[serde(default = "default_show_usage")]
+    show_fast_mode: bool,
+    #[serde(default = "default_show_usage")]
     show_credits: bool,
+    #[serde(default)]
+    show_cost: bool,
+    #[serde(default)]
+    show_cost_total: bool,
+    #[serde(default)]
+    show_project_tokens: bool,
+    #[serde(default)]
+    show_all_tokens: bool,
     #[serde(default)]
     always_on: bool,
 }
@@ -107,7 +123,12 @@ impl Default for RpcSettings {
             show_spark_primary_usage: true,
             show_spark_weekly_usage: true,
             show_effort: true,
+            show_fast_mode: true,
             show_credits: true,
+            show_cost: false,
+            show_cost_total: false,
+            show_project_tokens: false,
+            show_all_tokens: false,
             always_on: false,
         }
     }
@@ -140,6 +161,7 @@ struct DetectionResult {
     codex: Option<CodexConfig>,
     session: Option<CodexSession>,
     usage: Option<CodexUsage>,
+    costs: Option<CodexCosts>,
 }
 
 impl Default for DetectionResult {
@@ -150,6 +172,7 @@ impl Default for DetectionResult {
             codex: None,
             session: None,
             usage: None,
+            costs: None,
         }
     }
 }
@@ -158,10 +181,12 @@ impl Default for DetectionResult {
 struct CodexConfig {
     model: Option<String>,
     effort: Option<String>,
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct CodexSession {
+    cwd: String,
     repo_name: String,
 }
 
@@ -184,6 +209,40 @@ struct CodexUsage {
     spark_secondary: Option<LimitSnapshot>,
 }
 
+// Per-model-family token + cost rollup. Serialized camelCase so the figures are
+// JSON-ready for a future settings panel. OpenAI mapping vs the Claude original:
+// `cache_read_tokens` = cached_input_tokens (a SUBSET of input_tokens, billed at
+// 0.1x), and `cache_creation_tokens` is always 0 (OpenAI never bills cache writes).
+// `input_cost` already folds the cached discount in, so input_cost + output_cost
+// == cost_usd. Reasoning tokens are billed at the output rate.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCost {
+    label: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    input_cost: f64,
+    output_cost: f64,
+    cost_usd: f64,
+}
+
+// `current` = the current project's per-model spend (every session whose cwd
+// matches the live session's cwd); `all` = every rollout under ~/.codex/sessions
+// summed per family (there is no aggregate usage file like ~/.claude.json, so the
+// lifetime total is built from the sessions). The four flags mirror the RpcSettings
+// toggles and gate which lines the status/presence builders emit.
+#[derive(Debug, Clone, Default)]
+struct CodexCosts {
+    current: Vec<ModelCost>,
+    all: Vec<ModelCost>,
+    show_cost: bool,
+    show_cost_total: bool,
+    show_project_tokens: bool,
+    show_all_tokens: bool,
+}
+
 #[derive(Debug, Clone)]
 struct ProcessSnapshot {
     parent_name: Option<String>,
@@ -204,6 +263,11 @@ struct StateMachine {
     last_non_idle_at_ms: u64,
     last_emitted: DetectionResult,
     anchor_start_ms: Option<u64>,
+    // Per-rollout cost cache keyed by path -> (mtime, session cwd, per-model costs);
+    // only the live session is re-read once an old rollout's mtime stops changing.
+    cost_cache: HashMap<PathBuf, (u64, Option<String>, Vec<ModelCost>)>,
+    cached_costs: Option<CodexCosts>,
+    cached_costs_at_ms: u64,
 }
 
 pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: Option<PathBuf>) {
@@ -225,6 +289,7 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
     let mut settings = read_rpc_settings(&settings_path);
     let mut result = detect(&mut machine, idle_grace_ms);
     let mut last_scan_at = now_ms();
+    let mut last_metadata_refresh_at = last_scan_at;
 
     while !stop.load(Ordering::SeqCst) {
         if modified_ms(&settings_path) != settings_modified {
@@ -244,6 +309,10 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
         if now.saturating_sub(last_scan_at) >= scan_interval_ms {
             result = detect(&mut machine, idle_grace_ms);
             last_scan_at = now;
+            last_metadata_refresh_at = now;
+        } else if now.saturating_sub(last_metadata_refresh_at) >= CODEX_METADATA_REFRESH_MS {
+            refresh_codex_metadata(&mut result, settings.always_on);
+            last_metadata_refresh_at = now;
         }
 
         let mut display_result = result.clone();
@@ -253,6 +322,7 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             &status_path,
             &format_status_line(
                 &display_result,
+                &settings,
                 ipc.as_ref().and_then(|client| client.username.as_deref()),
             ),
         );
@@ -315,17 +385,36 @@ fn detect(machine: &mut StateMachine, idle_grace_ms: u64) -> DetectionResult {
         PresenceState::Idle
     };
 
-    let mut result = DetectionResult {
+    let session = if state == PresenceState::Idle {
+        None
+    } else {
+        read_codex_session()
+    };
+
+    let result = DetectionResult {
         state,
         started_at_ms: oldest,
-        codex: read_codex_config(),
-        session: None,
+        codex: read_codex_config(session.as_ref().map(|session| session.cwd.as_str())),
+        session,
         usage: read_codex_usage(),
+        costs: read_codex_costs(machine),
     };
-    if result.state != PresenceState::Idle {
-        result.session = read_codex_session();
-    }
     machine.step(result, idle_grace_ms)
+}
+
+fn refresh_codex_metadata(result: &mut DetectionResult, include_idle: bool) {
+    if result.state == PresenceState::Idle && !include_idle {
+        return;
+    }
+    let session = if result.state == PresenceState::Idle {
+        None
+    } else {
+        read_codex_session()
+    };
+    result.codex = read_codex_config(session.as_ref().map(|session| session.cwd.as_str()));
+    if result.state != PresenceState::Idle {
+        result.session = session;
+    }
 }
 
 impl StateMachine {
@@ -656,7 +745,7 @@ fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Va
         "created_at": now_ms(),
         "instance": false,
         "details": build_details(result, &mode),
-        "state": build_state_line(result),
+        "state": build_state_line(result, settings),
         "assets": {
             "large_image": "codex_logo",
             "large_text": build_large_image_text(result),
@@ -701,7 +790,7 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
     base.to_string()
 }
 
-fn build_state_line(result: &DetectionResult) -> String {
+fn build_state_line(result: &DetectionResult, settings: &RpcSettings) -> String {
     let model = result
         .codex
         .as_ref()
@@ -712,12 +801,26 @@ fn build_state_line(result: &DetectionResult) -> String {
         .as_ref()
         .and_then(|cfg| cfg.effort.as_deref())
         .and_then(format_effort);
+    let speed = settings
+        .show_fast_mode
+        .then(|| {
+            format_speed(
+                result
+                    .codex
+                    .as_ref()
+                    .and_then(|cfg| cfg.service_tier.as_deref()),
+            )
+        })
+        .flatten();
     let mut parts = Vec::new();
     if let Some(model) = model {
         parts.push(model);
     }
     if let Some(effort) = effort {
         parts.push(effort);
+    }
+    if let Some(speed) = speed {
+        parts.push(speed);
     }
     let base = if parts.is_empty() {
         match result.state {
@@ -739,11 +842,13 @@ fn build_state_line(result: &DetectionResult) -> String {
         } else {
             format!("{base} - {suffix}")
         };
-        if candidate.len() <= 48 {
+        // Discord's state field allows 128 chars; the old 48 cap silently dropped
+        // the trailing cost/token parts whenever usage already filled the line.
+        if candidate.len() <= 128 {
             return candidate;
         }
     }
-    truncate(base, 48)
+    truncate(base, 128)
 }
 
 fn build_large_image_text(result: &DetectionResult) -> String {
@@ -751,7 +856,7 @@ fn build_large_image_text(result: &DetectionResult) -> String {
     if usage.is_empty() {
         "OpenAI Codex".into()
     } else {
-        truncate(format!("OpenAI Codex - {}", usage.join(" - ")), 48)
+        truncate(format!("OpenAI Codex - {}", usage.join(" - ")), 128)
     }
 }
 
@@ -771,10 +876,20 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
             parts.push(format!("Spark wk {}%", remaining_percent(secondary)));
         }
     }
+    if let Some(cost) = compact_cost_part(result) {
+        parts.push(cost);
+    }
+    if let Some(tokens) = compact_tokens_part(result) {
+        parts.push(tokens);
+    }
     parts
 }
 
-fn format_status_line(result: &DetectionResult, discord_user: Option<&str>) -> String {
+fn format_status_line(
+    result: &DetectionResult,
+    settings: &RpcSettings,
+    discord_user: Option<&str>,
+) -> String {
     let state = match result.state {
         PresenceState::Both => "Codex: CLI/Desktop",
         PresenceState::Cli => "Codex: CLI",
@@ -792,7 +907,18 @@ fn format_status_line(result: &DetectionResult, discord_user: Option<&str>) -> S
         .as_ref()
         .and_then(|cfg| cfg.effort.as_deref())
         .and_then(format_effort);
-    let model_line = [model, effort]
+    let speed = settings
+        .show_fast_mode
+        .then(|| {
+            format_speed(
+                result
+                    .codex
+                    .as_ref()
+                    .and_then(|cfg| cfg.service_tier.as_deref()),
+            )
+        })
+        .flatten();
+    let model_line = [model, effort, speed]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -802,7 +928,10 @@ fn format_status_line(result: &DetectionResult, discord_user: Option<&str>) -> S
         Some(user) => format!("Discord: Connected ({user})"),
         None => "Discord: RPC Disabled".into(),
     };
-    format!("{state}|{model_line}|{usage_line}|{discord}")
+    // Cost detail is appended as a 5th field; readers that split on the first four
+    // fields (e.g. main.rs::parse_status_usage) are unaffected.
+    let cost = build_cost_status(result.costs.as_ref());
+    format!("{state}|{model_line}|{usage_line}|{discord}|{cost}")
 }
 
 fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
@@ -886,24 +1015,27 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
             codex.effort = None;
         }
     }
+    let any_cost = settings.show_cost
+        || settings.show_cost_total
+        || settings.show_project_tokens
+        || settings.show_all_tokens;
+    if !any_cost {
+        result.costs = None;
+    } else if let Some(costs) = result.costs.as_mut() {
+        costs.show_cost = settings.show_cost;
+        costs.show_cost_total = settings.show_cost_total;
+        costs.show_project_tokens = settings.show_project_tokens;
+        costs.show_all_tokens = settings.show_all_tokens;
+    }
 }
 
-fn read_codex_config() -> Option<CodexConfig> {
-    let mut cfg = CodexConfig::default();
-    if let Ok(raw) = fs::read_to_string(home_dir().join(".codex").join("config.toml")) {
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                break;
-            }
-            if let Some(value) = extract_toml_string(trimmed, "model") {
-                cfg.model = Some(value);
-            }
-            if let Some(value) = extract_toml_string(trimmed, "model_reasoning_effort") {
-                cfg.effort = Some(value);
-            }
-        }
-    }
+fn read_codex_config(project_cwd: Option<&str>) -> Option<CodexConfig> {
+    let mut cfg = if let Ok(raw) = fs::read_to_string(home_dir().join(".codex").join("config.toml"))
+    {
+        parse_codex_config(&raw, project_cwd)
+    } else {
+        CodexConfig::default()
+    };
     if let Some(runtime_cfg) = read_turn_context_config() {
         if runtime_cfg.model.is_some() {
             cfg.model = runtime_cfg.model;
@@ -911,12 +1043,59 @@ fn read_codex_config() -> Option<CodexConfig> {
         if runtime_cfg.effort.is_some() {
             cfg.effort = runtime_cfg.effort;
         }
+        if runtime_cfg.service_tier.is_some() {
+            cfg.service_tier = runtime_cfg.service_tier;
+        }
     }
-    if cfg.model.is_none() && cfg.effort.is_none() {
+    if cfg.model.is_none() && cfg.effort.is_none() && cfg.service_tier.is_none() {
         None
     } else {
         Some(cfg)
     }
+}
+
+fn parse_codex_config(raw: &str, project_cwd: Option<&str>) -> CodexConfig {
+    let mut cfg = CodexConfig::default();
+    let project_cwd = project_cwd.map(normalize_project_path);
+    let mut in_top_level = true;
+    let mut in_matching_project = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_top_level = false;
+            in_matching_project = project_cwd
+                .as_deref()
+                .zip(extract_project_section_path(trimmed).as_deref())
+                .map(|(cwd, section)| cwd == normalize_project_path(section))
+                .unwrap_or(false);
+            continue;
+        }
+        if !(in_top_level || in_matching_project) {
+            continue;
+        }
+        if let Some(value) = extract_toml_string(trimmed, "model") {
+            cfg.model = Some(value);
+        }
+        if let Some(value) = extract_toml_string(trimmed, "model_reasoning_effort") {
+            cfg.effort = Some(value);
+        }
+        if let Some(value) = extract_toml_string(trimmed, "service_tier") {
+            cfg.service_tier = Some(value);
+        }
+    }
+    cfg
+}
+
+fn extract_project_section_path(line: &str) -> Option<String> {
+    let value = line.strip_prefix("[projects.")?.strip_suffix(']')?.trim();
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        return Some(value[1..value.len() - 1].to_string());
+    }
+    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        return Some(value[1..value.len() - 1].replace("\\\"", "\""));
+    }
+    None
 }
 
 fn read_turn_context_config() -> Option<CodexConfig> {
@@ -948,8 +1127,13 @@ fn parse_turn_context_line(line: &str) -> Option<CodexConfig> {
             .get("effort")
             .and_then(Value::as_str)
             .map(str::to_string),
+        service_tier: payload
+            .get("service_tier")
+            .or_else(|| payload.get("serviceTier"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
     };
-    if cfg.model.is_none() && cfg.effort.is_none() {
+    if cfg.model.is_none() && cfg.effort.is_none() && cfg.service_tier.is_none() {
         None
     } else {
         Some(cfg)
@@ -968,6 +1152,7 @@ fn read_codex_session() -> Option<CodexSession> {
         .and_then(|payload| payload.get("cwd"))
         .and_then(Value::as_str)?;
     Some(CodexSession {
+        cwd: strip_windows_long_prefix(cwd).to_string(),
         repo_name: basename_safe(strip_windows_long_prefix(cwd)),
     })
 }
@@ -1025,11 +1210,14 @@ fn read_codex_usage() -> Option<CodexUsage> {
 }
 
 fn read_codex_account_usage() -> Option<CodexUsage> {
-    let cache = ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(AccountUsageCache::default()));
+    let cache =
+        ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(AccountUsageCache::default()));
     let now = now_ms();
     {
         let guard = cache.lock().ok()?;
-        if guard.checked_at_ms != 0 && now.saturating_sub(guard.checked_at_ms) < ACCOUNT_USAGE_CACHE_MS {
+        if guard.checked_at_ms != 0
+            && now.saturating_sub(guard.checked_at_ms) < ACCOUNT_USAGE_CACHE_MS
+        {
             return guard.usage.clone();
         }
     }
@@ -1044,7 +1232,8 @@ fn read_codex_account_usage() -> Option<CodexUsage> {
 fn read_codex_account_usage_uncached() -> Option<CodexUsage> {
     const ACCOUNT_USAGE_TIMEOUT_MS: u64 = 5000;
     const INIT_REQUEST: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-rpc\",\"version\":\"0\"}}}\n";
-    const READ_REQUEST: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"account/rateLimits/read\",\"params\":null}\n";
+    const READ_REQUEST: &[u8] =
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"account/rateLimits/read\",\"params\":null}\n";
 
     for command in codex_command_candidates() {
         let mut cmd = std::process::Command::new(&command);
@@ -1174,7 +1363,11 @@ fn codex_command_candidates() -> Vec<PathBuf> {
             candidates.push(PathBuf::from(app_data).join("npm").join("codex.cmd"));
         }
         if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            candidates.push(PathBuf::from(program_files).join("nodejs").join("codex.cmd"));
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("nodejs")
+                    .join("codex.cmd"),
+            );
         }
     }
     #[cfg(not(windows))]
@@ -1218,21 +1411,19 @@ fn parse_account_usage_payload(payload: &Value, observed_at_ms: u64) -> Option<C
         .get("rateLimitsByLimitId")
         .and_then(Value::as_object);
     let codex_entry = by_id.and_then(|map| map.get("codex"));
-    let limits = codex_entry
-        .or_else(|| payload.get("rateLimits"))?;
-    let spark = by_id
-        .and_then(|map| {
-            map.iter()
-                .find(|(key, value)| {
-                    key.as_str() != "codex"
-                        && value
-                            .get("limitName")
-                            .and_then(Value::as_str)
-                            .map(|name| name.to_ascii_lowercase().contains("spark"))
-                            .unwrap_or(false)
-                })
-                .map(|(key, value)| (key.clone(), value.clone()))
-        });
+    let limits = codex_entry.or_else(|| payload.get("rateLimits"))?;
+    let spark = by_id.and_then(|map| {
+        map.iter()
+            .find(|(key, value)| {
+                key.as_str() != "codex"
+                    && value
+                        .get("limitName")
+                        .and_then(Value::as_str)
+                        .map(|name| name.to_ascii_lowercase().contains("spark"))
+                        .unwrap_or(false)
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+    });
     Some(CodexUsage {
         limit_id: limits
             .get("limitId")
@@ -1421,6 +1612,411 @@ fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
         lines.remove(0);
     }
     Some(lines)
+}
+
+// ── Per-model cost tracking ────────────────────────────────────────────────
+// Codex bills per token like the OpenAI API. There is no aggregate usage file
+// (no ~/.codex equivalent of ~/.claude.json), so spend is reconstructed from the
+// rollout logs and summed per session.
+
+// Classifies a model id (matched case-insensitively) to its family label and
+// (input, output) USD-per-million rates. Cached input is always input * 0.1.
+// Order matters: "codex"/"nano"/"mini" are tested before the generic "gpt-5.4"
+// so e.g. "gpt-5.4-mini" classifies as Mini, not GPT-5.4.
+fn model_pricing(model_id: &str) -> Option<(&'static str, f64, f64)> {
+    let id = model_id.to_ascii_lowercase();
+    if id.contains("codex") {
+        Some(("Codex", 1.75, 14.00))
+    } else if id.contains("gpt-5.5") {
+        Some(("GPT-5.5", 5.00, 30.00))
+    } else if id.contains("nano") {
+        Some(("Nano", 0.20, 1.25))
+    } else if id.contains("mini") {
+        Some(("Mini", 0.75, 4.50))
+    } else if id.contains("gpt-5.4") {
+        Some(("GPT-5.4", 2.50, 15.00))
+    } else {
+        None
+    }
+}
+
+// Per-model cost for a single rollout. Each turn's token delta (`last_token_usage`)
+// is attributed to the model active at that turn (the latest `turn_context.model`),
+// so a session that switches models is split correctly. The whole file is read
+// because the model can change mid-session and every turn's delta counts.
+fn rollout_model_costs(path: &Path) -> Vec<ModelCost> {
+    match fs::read_to_string(path) {
+        Ok(raw) => rollout_model_costs_from_str(&raw),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn rollout_model_costs_from_str(raw: &str) -> Vec<ModelCost> {
+    let mut by_family: HashMap<&'static str, ModelCost> = HashMap::new();
+    let mut current_model: Option<String> = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        match entry.get("type").and_then(Value::as_str) {
+            Some("turn_context") => {
+                if let Some(model) = entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("model"))
+                    .and_then(Value::as_str)
+                {
+                    current_model = Some(model.to_string());
+                }
+            }
+            Some("event_msg") => {
+                let Some(payload) = entry.get("payload") else {
+                    continue;
+                };
+                if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+                    continue;
+                }
+                let Some(delta) = payload
+                    .get("info")
+                    .and_then(|info| info.get("last_token_usage"))
+                else {
+                    continue;
+                };
+                let Some((label, input_rate, output_rate)) =
+                    current_model.as_deref().and_then(model_pricing)
+                else {
+                    continue;
+                };
+                let tok = |key: &str| delta.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let input = tok("input_tokens");
+                let output = tok("output_tokens");
+                // cached_input_tokens is a subset of input_tokens; clamp defensively.
+                let cached = tok("cached_input_tokens").min(input);
+                let reasoning = tok("reasoning_output_tokens");
+                let uncached = input - cached;
+                // OpenAI cost: uncached input at full rate, cached input at 0.1x,
+                // output (reasoning included) at the output rate. No cache-write cost.
+                let input_cost = (uncached as f64 * input_rate
+                    + cached as f64 * input_rate * CACHED_INPUT_MULT)
+                    / 1_000_000.0;
+                let output_cost = (output + reasoning) as f64 / 1_000_000.0 * output_rate;
+                let bucket = by_family.entry(label).or_insert_with(|| ModelCost {
+                    label: label.to_string(),
+                    ..ModelCost::default()
+                });
+                bucket.input_tokens += input;
+                bucket.output_tokens += output;
+                bucket.cache_read_tokens += cached;
+                bucket.input_cost += input_cost;
+                bucket.output_cost += output_cost;
+                bucket.cost_usd += input_cost + output_cost;
+            }
+            _ => {}
+        }
+    }
+    let mut models: Vec<ModelCost> = by_family.into_values().collect();
+    sort_costs(&mut models);
+    models
+}
+
+// Live session (`current`) + every rollout summed per family (`all`). Throttled
+// to COST_REFRESH_MS and backed by a per-file mtime cache, so steady state only
+// re-reads the growing live rollout rather than the whole history.
+fn read_codex_costs(machine: &mut StateMachine) -> Option<CodexCosts> {
+    let now = now_ms();
+    // Throttle on the timestamp alone (not on `cached_costs.is_some()`): a None
+    // result must also be cached for COST_REFRESH_MS, otherwise a sessions dir with
+    // no billable models would re-walk the whole tree on every 5s tick.
+    if machine.cached_costs_at_ms != 0
+        && now.saturating_sub(machine.cached_costs_at_ms) < COST_REFRESH_MS
+    {
+        return machine.cached_costs.clone();
+    }
+
+    // u64::MAX age = no cutoff: lifetime totals span every session.
+    let files = find_recent_rollout_files(&sessions_dir(), u64::MAX);
+
+    let mut all: HashMap<String, ModelCost> = HashMap::new();
+    let mut by_project: HashMap<String, HashMap<String, ModelCost>> = HashMap::new();
+    let mut live_cwd: Option<String> = None;
+    let mut live_costs: Vec<ModelCost> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    for (index, (path, mtime)) in files.iter().enumerate() {
+        seen.insert(path.clone());
+        let cached_hit = machine
+            .cost_cache
+            .get(path)
+            .filter(|(cached_mtime, _, _)| *cached_mtime == *mtime)
+            .map(|(_, cwd, costs)| (cwd.clone(), costs.clone()));
+        let (cwd, costs) = match cached_hit {
+            Some(hit) => hit,
+            None => {
+                let cwd = rollout_cwd(path);
+                let costs = rollout_model_costs(path);
+                machine
+                    .cost_cache
+                    .insert(path.clone(), (*mtime, cwd.clone(), costs.clone()));
+                (cwd, costs)
+            }
+        };
+        // The newest rollout is the live session; its cwd is the current project.
+        if index == 0 {
+            live_cwd = cwd.clone();
+            live_costs = costs.clone();
+        }
+        for model in &costs {
+            let bucket = all.entry(model.label.clone()).or_insert_with(|| ModelCost {
+                label: model.label.clone(),
+                ..ModelCost::default()
+            });
+            add_cost(bucket, model);
+        }
+        if let Some(cwd) = &cwd {
+            let project = by_project.entry(cwd.clone()).or_default();
+            for model in &costs {
+                let bucket = project
+                    .entry(model.label.clone())
+                    .or_insert_with(|| ModelCost {
+                        label: model.label.clone(),
+                        ..ModelCost::default()
+                    });
+                add_cost(bucket, model);
+            }
+        }
+    }
+    machine.cost_cache.retain(|path, _| seen.contains(path));
+
+    let mut all: Vec<ModelCost> = all.into_values().collect();
+    sort_costs(&mut all);
+
+    // Current project = every session under the live session's cwd; fall back to
+    // the live session alone when no cwd is recorded.
+    let current = match live_cwd.as_ref().and_then(|cwd| by_project.remove(cwd)) {
+        Some(map) => {
+            let mut models: Vec<ModelCost> = map.into_values().collect();
+            sort_costs(&mut models);
+            models
+        }
+        None => {
+            sort_costs(&mut live_costs);
+            live_costs
+        }
+    };
+
+    let costs = if all.is_empty() && current.is_empty() {
+        None
+    } else {
+        Some(CodexCosts {
+            current,
+            all,
+            show_cost: false,
+            show_cost_total: false,
+            show_project_tokens: false,
+            show_all_tokens: false,
+        })
+    };
+    machine.cached_costs = costs.clone();
+    machine.cached_costs_at_ms = now;
+    costs
+}
+
+// Current working directory recorded in a rollout's session_meta (first line),
+// normalized for matching. Used to group sessions by project.
+fn rollout_cwd(path: &Path) -> Option<String> {
+    let first = read_first_line(path)?;
+    let obj: Value = serde_json::from_str(first.trim()).ok()?;
+    if obj.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    obj.get("payload")
+        .and_then(|payload| payload.get("cwd"))
+        .and_then(Value::as_str)
+        .map(normalize_project_path)
+}
+
+fn normalize_project_path(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
+fn sort_costs(models: &mut [ModelCost]) {
+    models.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn add_cost(bucket: &mut ModelCost, model: &ModelCost) {
+    bucket.input_tokens += model.input_tokens;
+    bucket.output_tokens += model.output_tokens;
+    bucket.cache_read_tokens += model.cache_read_tokens;
+    bucket.cache_creation_tokens += model.cache_creation_tokens;
+    bucket.input_cost += model.input_cost;
+    bucket.output_cost += model.output_cost;
+    bucket.cost_usd += model.cost_usd;
+}
+
+fn format_cost(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+fn format_tokens(count: u64) -> String {
+    if count >= 1_000_000_000 {
+        format!("{:.1}B", count as f64 / 1_000_000_000.0)
+    } else if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.0}K", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
+// "Codex $0.45 · GPT-5.5 $1.23 · +1" — per-model spend for the live session.
+fn build_cost_line(current: &[ModelCost]) -> Option<String> {
+    let positives: Vec<&ModelCost> = current
+        .iter()
+        .filter(|model| model.cost_usd > 0.0)
+        .collect();
+    if positives.is_empty() {
+        return None;
+    }
+    const TOP: usize = 3;
+    let mut parts: Vec<String> = positives
+        .iter()
+        .take(TOP)
+        .map(|model| format!("{} {}", model.label, format_cost(model.cost_usd)))
+        .collect();
+    if positives.len() > TOP {
+        parts.push(format!("+{}", positives.len() - TOP));
+    }
+    Some(parts.join(" · "))
+}
+
+// "($321.99)" — lifetime total across all sessions.
+fn build_cost_total_line(all: &[ModelCost]) -> Option<String> {
+    let total: f64 = all.iter().map(|model| model.cost_usd).sum();
+    (total > 0.0).then(|| format!("({})", format_cost(total)))
+}
+
+fn sum_tokens(models: &[ModelCost]) -> (u64, u64) {
+    models.iter().fold((0u64, 0u64), |(input, output), model| {
+        (input + model.input_tokens, output + model.output_tokens)
+    })
+}
+
+// "84K in / 451K out" — current project tokens. Labelled because for Codex the
+// input (the full context resent and billed each turn) dwarfs the output, so an
+// unlabelled "big/small" reads as reversed. Cached input and reasoning are folded
+// into cost, not these displayed counts.
+fn build_tokens_line(current: &[ModelCost]) -> Option<String> {
+    let (input, output) = sum_tokens(current);
+    (input > 0 || output > 0).then(|| {
+        format!(
+            "{} in / {} out",
+            format_tokens(input),
+            format_tokens(output)
+        )
+    })
+}
+
+// "Σ 6.5M in / 13.2M out" — tokens summed across every project.
+fn build_all_tokens_line(all: &[ModelCost]) -> Option<String> {
+    let (input, output) = sum_tokens(all);
+    (input > 0 || output > 0).then(|| {
+        format!(
+            "\u{03a3} {} in / {} out",
+            format_tokens(input),
+            format_tokens(output)
+        )
+    })
+}
+
+// Detail field appended to the local status line. Each of the four views is
+// emitted only when its toggle is on: project cost, all-projects cost total,
+// project tokens, all-projects tokens.
+fn build_cost_status(costs: Option<&CodexCosts>) -> String {
+    let Some(costs) = costs else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if costs.show_cost {
+        if let Some(line) = build_cost_line(&costs.current) {
+            parts.push(line);
+        }
+    }
+    if costs.show_cost_total {
+        if let Some(total) = build_cost_total_line(&costs.all) {
+            parts.push(total);
+        }
+    }
+    if costs.show_project_tokens {
+        if let Some(tokens) = build_tokens_line(&costs.current) {
+            parts.push(tokens);
+        }
+    }
+    if costs.show_all_tokens {
+        if let Some(tokens) = build_all_tokens_line(&costs.all) {
+            parts.push(tokens);
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("Cost: {}", parts.join(" · "))
+    }
+}
+
+// Compact total ("$0.45") for the Discord presence; appended last so the
+// state-line length fit drops it before any usage percentage. Prefers the
+// current-project total, falling back to the all-projects total.
+fn compact_cost_part(result: &DetectionResult) -> Option<String> {
+    let costs = result.costs.as_ref()?;
+    if costs.show_cost {
+        let total: f64 = costs.current.iter().map(|model| model.cost_usd).sum();
+        if total > 0.0 {
+            return Some(format_cost(total));
+        }
+    }
+    if costs.show_cost_total {
+        let total: f64 = costs.all.iter().map(|model| model.cost_usd).sum();
+        if total > 0.0 {
+            return Some(format_cost(total));
+        }
+    }
+    None
+}
+
+// Compact tokens ("84K in / 451K out" or "Σ 6.5M in / 13.2M out") for the Discord
+// presence. Prefers the current-project tokens, falling back to the all-projects.
+fn compact_tokens_part(result: &DetectionResult) -> Option<String> {
+    let costs = result.costs.as_ref()?;
+    if costs.show_project_tokens {
+        let (input, output) = sum_tokens(&costs.current);
+        if input > 0 || output > 0 {
+            return Some(format!(
+                "{} in / {} out",
+                format_tokens(input),
+                format_tokens(output)
+            ));
+        }
+    }
+    if costs.show_all_tokens {
+        let (input, output) = sum_tokens(&costs.all);
+        if input > 0 || output > 0 {
+            return Some(format!(
+                "\u{03a3} {} in / {} out",
+                format_tokens(input),
+                format_tokens(output)
+            ));
+        }
+    }
+    None
 }
 
 struct DiscordIpc {
@@ -1734,6 +2330,15 @@ fn format_effort(effort: &str) -> Option<String> {
     sanitize_field(Some(label), 16)
 }
 
+fn format_speed(service_tier: Option<&str>) -> Option<String> {
+    let label = match service_tier.map(|value| value.to_ascii_lowercase()) {
+        Some(value) if value == "fast" || value == "priority" => "Fast",
+        Some(value) if value == "standard" => "Standard",
+        _ => "Standard",
+    };
+    sanitize_field(Some(label), 16)
+}
+
 fn sanitize_field(raw: Option<&str>, max_len: usize) -> Option<String> {
     let cleaned = raw?
         .chars()
@@ -1787,7 +2392,7 @@ fn small_image_text(state: PresenceState) -> &'static str {
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
     format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         result.state,
         result.started_at_ms,
         result
@@ -1801,6 +2406,11 @@ fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
             .and_then(|cfg| cfg.effort.as_deref())
             .unwrap_or(""),
         result
+            .codex
+            .as_ref()
+            .and_then(|cfg| cfg.service_tier.as_deref())
+            .unwrap_or(""),
+        result
             .session
             .as_ref()
             .map(|session| session.repo_name.as_str())
@@ -1812,7 +2422,12 @@ fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
         settings.show_spark_primary_usage,
         settings.show_spark_weekly_usage,
         settings.show_effort,
+        settings.show_fast_mode,
         settings.show_credits,
+        settings.show_cost,
+        settings.show_cost_total,
+        settings.show_project_tokens,
+        settings.show_all_tokens,
         settings.always_on,
         settings
             .buttons
@@ -1912,4 +2527,161 @@ fn basename_safe(path: &str) -> String {
         .find(|part| !part.is_empty())
         .unwrap_or(trimmed)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_and_status_include_fast_service_tier() {
+        let result = DetectionResult {
+            state: PresenceState::Cli,
+            codex: Some(CodexConfig {
+                model: Some("gpt-5.5".into()),
+                effort: Some("high".into()),
+                service_tier: Some("fast".into()),
+            }),
+            ..DetectionResult::default()
+        };
+
+        let settings = RpcSettings::default();
+
+        assert_eq!(
+            build_state_line(&result, &settings),
+            "GPT-5.5 - High - Fast"
+        );
+        assert!(format_status_line(&result, &settings, None)
+            .starts_with("Codex: CLI|GPT-5.5 - High - Fast|"));
+    }
+
+    #[test]
+    fn project_config_overrides_top_level_service_tier() {
+        let raw = r#"
+model = "gpt-5.5"
+model_reasoning_effort = "medium"
+service_tier = "standard"
+
+[projects.'d:\users\stealthy\documents\github\codex-rpc']
+service_tier = "fast"
+"#;
+        let cfg = parse_codex_config(raw, Some(r"D:\Users\stealthy\Documents\GitHub\codex-rpc"));
+
+        assert_eq!(cfg.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(cfg.effort.as_deref(), Some("medium"));
+        assert_eq!(cfg.service_tier.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn priority_service_tier_displays_as_fast() {
+        assert_eq!(format_speed(Some("priority")).as_deref(), Some("Fast"));
+    }
+
+    #[test]
+    fn state_and_status_include_standard_when_not_fast() {
+        let result = DetectionResult {
+            state: PresenceState::App,
+            codex: Some(CodexConfig {
+                model: Some("gpt-5.5".into()),
+                effort: Some("high".into()),
+                service_tier: None,
+            }),
+            ..DetectionResult::default()
+        };
+        let settings = RpcSettings::default();
+
+        assert_eq!(
+            build_state_line(&result, &settings),
+            "GPT-5.5 - High - Standard"
+        );
+        assert!(format_status_line(&result, &settings, None)
+            .starts_with("Codex: Desktop|GPT-5.5 - High - Standard|"));
+    }
+
+    #[test]
+    fn model_pricing_classifier_order() {
+        assert_eq!(model_pricing("gpt-5.3-codex").unwrap().0, "Codex");
+        assert_eq!(model_pricing("gpt-5.5").unwrap().0, "GPT-5.5");
+        assert_eq!(model_pricing("gpt-5.4-nano").unwrap().0, "Nano");
+        assert_eq!(model_pricing("gpt-5.4-mini").unwrap().0, "Mini");
+        assert_eq!(model_pricing("gpt-5.4").unwrap().0, "GPT-5.4");
+        // "codex" wins even when other substrings are present.
+        assert_eq!(model_pricing("gpt-5.4-codex-mini").unwrap().0, "Codex");
+        assert!(model_pricing("o3").is_none());
+        assert!(model_pricing("gpt-4.1").is_none());
+    }
+
+    #[test]
+    fn rollout_costs_attribute_deltas_per_model() {
+        // Real rollout shape: session_meta has no model; turn_context sets it;
+        // token_count carries cumulative + per-turn (last_token_usage) deltas.
+        let raw = concat!(
+            r#"{"type":"session_meta","payload":{"cwd":"d:/x","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"cached_input_tokens":200000,"output_tokens":500000,"reasoning_output_tokens":100000,"total_tokens":1600000}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":400000,"cached_input_tokens":400000,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":400000}}}}"#,
+            "\n",
+        );
+        let models = rollout_model_costs_from_str(raw);
+        assert_eq!(models.len(), 2);
+
+        // Sorted by cost desc: GPT-5.5 first.
+        let gpt = &models[0];
+        assert_eq!(gpt.label, "GPT-5.5");
+        // input: (800k*5 + 200k*0.5)/1e6 = 4.1 ; output: 600k/1e6*30 = 18.0
+        assert!(
+            (gpt.input_cost - 4.1).abs() < 1e-9,
+            "input_cost={}",
+            gpt.input_cost
+        );
+        assert!(
+            (gpt.output_cost - 18.0).abs() < 1e-9,
+            "output_cost={}",
+            gpt.output_cost
+        );
+        assert!(
+            (gpt.cost_usd - 22.1).abs() < 1e-9,
+            "cost_usd={}",
+            gpt.cost_usd
+        );
+        assert_eq!(gpt.input_tokens, 1_000_000);
+        assert_eq!(gpt.output_tokens, 500_000);
+        assert_eq!(gpt.cache_read_tokens, 200_000);
+        assert_eq!(gpt.cache_creation_tokens, 0);
+
+        let codex = &models[1];
+        assert_eq!(codex.label, "Codex");
+        // fully cached input: 400k*1.75*0.1/1e6 = 0.07 ; no output.
+        assert!(
+            (codex.cost_usd - 0.07).abs() < 1e-9,
+            "cost_usd={}",
+            codex.cost_usd
+        );
+        assert_eq!(codex.cache_read_tokens, 400_000);
+    }
+
+    #[test]
+    fn rollout_costs_skip_tokens_before_first_turn_context() {
+        // A token_count before any turn_context has no model to attribute to.
+        let raw = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"output_tokens":1000000}}}}"#,
+            "\n",
+        );
+        assert!(rollout_model_costs_from_str(raw).is_empty());
+    }
+
+    #[test]
+    fn format_tokens_scales_to_billions() {
+        assert_eq!(format_tokens(500), "500");
+        assert_eq!(format_tokens(84_000), "84K");
+        assert_eq!(format_tokens(1_500_000), "1.5M");
+        assert_eq!(format_tokens(999_000_000), "999.0M");
+        assert_eq!(format_tokens(1_000_000_000), "1.0B");
+        assert_eq!(format_tokens(2_500_000_000), "2.5B");
+    }
 }
