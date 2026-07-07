@@ -1,6 +1,6 @@
 [package]
 name = "codex_rich_presence_tray"
-version = "0.3.21"
+version = "0.3.22"
 description = "Codex RPC"
 authors = ["StealthyLabs"]
 license = "MIT"
@@ -18,5 +18,6 @@ tauri = { version = "2", features = ["tray-icon"] }
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Pipes",
   "Win32_System_Threading",
 ] }

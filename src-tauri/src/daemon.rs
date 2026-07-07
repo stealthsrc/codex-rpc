@@ -18,6 +18,8 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
@@ -30,6 +32,7 @@ use windows::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
                 TH32CS_SNAPPROCESS,
             },
+            Pipes::PeekNamedPipe,
             Threading::{
                 GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
                 PROCESS_QUERY_LIMITED_INFORMATION,
@@ -41,7 +44,9 @@ use windows::{
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1494452015504293908";
 const SCAN_INTERVAL_MS: u64 = 5000;
 const UI_REFRESH_INTERVAL_MS: u64 = 500;
-const CODEX_METADATA_REFRESH_MS: u64 = 250;
+const CODEX_METADATA_REFRESH_MS: u64 = 2000;
+const IPC_RETRY_MS: u64 = 10_000;
+const IPC_READ_TIMEOUT_MS: u64 = 5000;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const LOCAL_USAGE_REFRESH_MS: u64 = 60_000;
@@ -283,7 +288,9 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
 
     let mut machine = StateMachine::default();
     let mut ipc: Option<DiscordIpc> = None;
+    let mut next_ipc_attempt_at = 0;
     let mut last_key = String::new();
+    let mut last_status_line: Option<String> = None;
     let mut last_rpc_refresh_at = 0;
     let mut settings_modified = modified_ms(&settings_path);
     let mut settings = read_rpc_settings(&settings_path);
@@ -298,10 +305,12 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             last_key.clear();
         }
 
-        if ipc.is_none() {
+        if ipc.is_none() && now_ms() >= next_ipc_attempt_at {
             ipc = DiscordIpc::connect(&client_id).ok();
             if ipc.is_some() {
                 last_key.clear();
+            } else {
+                next_ipc_attempt_at = now_ms() + IPC_RETRY_MS;
             }
         }
 
@@ -318,14 +327,15 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
         let mut display_result = result.clone();
         apply_always_on(&mut display_result, &settings);
         filter_usage(&mut display_result, &settings);
-        write_status(
-            &status_path,
-            &format_status_line(
-                &display_result,
-                &settings,
-                ipc.as_ref().and_then(|client| client.username.as_deref()),
-            ),
+        let status_line = format_status_line(
+            &display_result,
+            &settings,
+            ipc.as_ref().and_then(|client| client.username.as_deref()),
         );
+        if last_status_line.as_deref() != Some(status_line.as_str()) {
+            write_status(&status_path, &status_line);
+            last_status_line = Some(status_line);
+        }
 
         let key = presence_key(&display_result, &settings);
         let should_refresh_rpc = now.saturating_sub(last_rpc_refresh_at) >= RPC_REFRESH_INTERVAL_MS;
@@ -341,6 +351,7 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
                     last_rpc_refresh_at = now;
                 } else {
                     ipc = None;
+                    next_ipc_attempt_at = now + IPC_RETRY_MS;
                     last_key.clear();
                     last_rpc_refresh_at = 0;
                 }
@@ -555,8 +566,10 @@ fn list_process_entries() -> Vec<ProcessEntry> {
     };
 
     let mut entries = Vec::new();
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
 
     if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
         loop {
@@ -1582,7 +1595,7 @@ fn find_recent_rollout_files(root: &Path, max_age_ms: u64) -> Vec<(PathBuf, u64)
 
     let mut files = Vec::new();
     walk(root, now_ms(), max_age_ms, &mut files);
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|file| std::cmp::Reverse(file.1));
     files
 }
 
@@ -2036,10 +2049,42 @@ impl Read for IpcConnection {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             #[cfg(windows)]
-            Self::File(file) => file.read(buf),
+            Self::File(file) => {
+                wait_pipe_readable(file, IPC_READ_TIMEOUT_MS)?;
+                file.read(buf)
+            }
             #[cfg(unix)]
             Self::Unix(stream) => stream.read(buf),
         }
+    }
+}
+
+// Named pipes opened as files block forever on read; poll with PeekNamedPipe
+// so a stalled Discord client cannot hang the daemon loop.
+#[cfg(windows)]
+fn wait_pipe_readable(file: &File, timeout_ms: u64) -> std::io::Result<()> {
+    let handle = HANDLE(file.as_raw_handle());
+    let deadline = now_ms() + timeout_ms;
+    loop {
+        let mut available = 0u32;
+        unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) }.map_err(
+            |_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "discord ipc closed",
+                )
+            },
+        )?;
+        if available > 0 {
+            return Ok(());
+        }
+        if now_ms() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "discord ipc read timeout",
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -2112,10 +2157,7 @@ impl DiscordIpc {
             let frame = self.read_frame()?;
             if frame.get("nonce").and_then(Value::as_str) == Some(nonce) {
                 if frame.get("evt").and_then(Value::as_str) == Some("ERROR") {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "discord rpc error",
-                    ));
+                    return Err(std::io::Error::other("discord rpc error"));
                 }
                 return Ok(());
             }
@@ -2190,6 +2232,7 @@ fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
         for id in 0..10 {
             let path = base.join(format!("discord-ipc-{id}"));
             if let Ok(stream) = UnixStream::connect(path) {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(IPC_READ_TIMEOUT_MS)));
                 return Ok(IpcConnection::Unix(stream));
             }
         }
