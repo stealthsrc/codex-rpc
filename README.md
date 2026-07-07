@@ -56,6 +56,18 @@ Portable asset:
 Run the app once. It starts in the system tray. Left-click the tray icon to open
 settings, or right-click for quick toggles and Quit.
 
+### macOS: "app is damaged" or "cannot be opened"
+
+The macOS build is ad-hoc signed but not notarized by Apple, so Gatekeeper
+blocks it after download. Clear the quarantine flag once:
+
+```bash
+xattr -cr "/Applications/Codex RPC.app"
+```
+
+Alternatively, right-click the app and choose Open, or allow it under
+System Settings → Privacy & Security → "Open Anyway".
+
 ## Usage
 
 The settings window controls:
