@@ -326,12 +326,14 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
 
         let mut display_result = result.clone();
         apply_always_on(&mut display_result, &settings);
-        filter_usage(&mut display_result, &settings);
+        // Status line keeps unfiltered usage: the show_* flags only gate what is
+        // published to Discord, not what the tray popup displays locally.
         let status_line = format_status_line(
             &display_result,
             &settings,
             ipc.as_ref().and_then(|client| client.username.as_deref()),
         );
+        filter_usage(&mut display_result, &settings);
         if last_status_line.as_deref() != Some(status_line.as_str()) {
             write_status(&status_path, &status_line);
             last_status_line = Some(status_line);

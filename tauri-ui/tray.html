@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex RPC Menu</title>
+    <link rel="stylesheet" href="./tray.css" />
+    <script defer src="./tray.js"></script>
+  </head>
+  <body>
+    <div class="card" id="card">
+      <header class="header">
+        <img class="logo" src="./codex_logo.png" alt="" />
+        <div class="header-text">
+          <span class="header-title">Codex RPC</span>
+          <span class="header-sub" id="model-line">—</span>
+        </div>
+        <span class="status-dot" id="status-dot" title="Status"></span>
+      </header>
+
+      <div class="section-label">Usage</div>
+      <div class="usage" id="usage">
+        <div class="usage-row" data-usage="primary">
+          <span class="usage-label">5h</span>
+          <div class="usage-bar"><div class="usage-fill"></div></div>
+          <span class="usage-value">—</span>
+        </div>
+        <div class="usage-row" data-usage="secondary">
+          <span class="usage-label">Week</span>
+          <div class="usage-bar"><div class="usage-fill"></div></div>
+          <span class="usage-value">—</span>
+        </div>
+        <div class="usage-row" data-usage="spark_primary">
+          <span class="usage-label">Spark 5h</span>
+          <div class="usage-bar"><div class="usage-fill"></div></div>
+          <span class="usage-value">—</span>
+        </div>
+        <div class="usage-row" data-usage="spark_secondary">
+          <span class="usage-label">Spark week</span>
+          <div class="usage-bar"><div class="usage-fill"></div></div>
+          <span class="usage-value">—</span>
+        </div>
+      </div>
+
+      <div class="separator"></div>
+
+      <button type="button" class="item" id="item-startup">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+        </svg>
+        <span id="startup-label">Start on Windows</span>
+        <span class="switch" id="startup-switch"><span class="knob"></span></span>
+      </button>
+
+      <button type="button" class="item" id="item-settings">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+        <span>Settings</span>
+      </button>
+
+      <div class="separator"></div>
+
+      <button type="button" class="item danger" id="item-quit">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+          <line x1="12" y1="2" x2="12" y2="12" />
+        </svg>
+        <span>Quit Codex RPC</span>
+      </button>
+
+      <footer class="footer">
+        <span id="discord-line">Discord: —</span>
+      </footer>
+    </div>
+  </body>
+</html>

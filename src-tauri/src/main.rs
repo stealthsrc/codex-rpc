@@ -10,13 +10,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    thread,
-    time::Duration,
 };
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, PhysicalPosition, WindowEvent,
 };
 
 #[cfg(windows)]
@@ -32,15 +29,6 @@ struct DaemonState {
     error: Mutex<Option<String>>,
     stop: Arc<AtomicBool>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-}
-
-#[derive(Default)]
-struct TrayMenuState {
-    usage_5h: Mutex<Option<MenuItem<tauri::Wry>>>,
-    usage_week: Mutex<Option<MenuItem<tauri::Wry>>>,
-    usage_spark_5h: Mutex<Option<MenuItem<tauri::Wry>>>,
-    usage_spark_week: Mutex<Option<MenuItem<tauri::Wry>>>,
-    startup: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,22 +178,25 @@ fn daemon_status(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, S
 fn main() {
     tauri::Builder::default()
         .manage(DaemonState::default())
-        .manage(TrayMenuState::default())
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
             load_status,
             start_daemon,
             daemon_status,
-            close_settings
+            close_settings,
+            tray_snapshot,
+            toggle_startup,
+            open_settings_from_tray,
+            quit_app
         ])
         .setup(|app| {
             keep_window_in_tray(app);
+            hide_tray_popup_on_blur(app);
             let handle = app.handle().clone();
             let state = app.state::<DaemonState>();
             start_daemon_inner(&handle, &state);
             create_tray(app)?;
-            spawn_usage_refresh_thread(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -225,89 +216,23 @@ fn keep_window_in_tray(app: &mut tauri::App) {
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, "show", "Settings", true, None::<&str>)?;
-    let usage_5h_item = MenuItem::with_id(app, "usage_5h", "5h: —", false, None::<&str>)?;
-    let usage_week_item = MenuItem::with_id(app, "usage_week", "Week: —", false, None::<&str>)?;
-    let usage_spark_5h_item =
-        MenuItem::with_id(app, "usage_spark_5h", "Spark 5h: —", false, None::<&str>)?;
-    let usage_spark_week_item = MenuItem::with_id(
-        app,
-        "usage_spark_week",
-        "Spark week: —",
-        false,
-        None::<&str>,
-    )?;
-    let startup_item = CheckMenuItem::with_id(
-        app,
-        "startup",
-        startup_menu_label(),
-        true,
-        startup_enabled(),
-        None::<&str>,
-    )?;
-    let separator_1 = PredefinedMenuItem::separator(app)?;
-    let separator_2 = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show_item,
-            &separator_1,
-            &usage_5h_item,
-            &usage_week_item,
-            &usage_spark_5h_item,
-            &usage_spark_week_item,
-            &startup_item,
-            &separator_2,
-            &quit_item,
-        ],
-    )?;
-
-    let tray_state = app.state::<TrayMenuState>();
-    *tray_state
-        .usage_5h
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(usage_5h_item.clone());
-    *tray_state
-        .usage_week
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(usage_week_item.clone());
-    *tray_state
-        .usage_spark_5h
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(usage_spark_5h_item.clone());
-    *tray_state
-        .usage_spark_week
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(usage_spark_week_item.clone());
-    *tray_state.startup.lock().expect("tray menu mutex poisoned") = Some(startup_item.clone());
-
     TrayIconBuilder::new()
         .tooltip("Codex RPC")
         .icon(app.default_window_icon().unwrap().clone())
-        .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| match event.id.as_ref() {
-            "show" => show_settings(app),
-            "startup" => {
-                let _ = set_startup_enabled(!startup_enabled());
-                sync_startup_menu(app);
-            }
-            "quit" => {
-                let state = app.state::<DaemonState>();
-                stop_daemon(&state);
-                app.exit(0);
-            }
-            _ => {}
-        })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Up,
+                position,
                 ..
             } = event
             {
-                show_settings(tray.app_handle());
+                match button {
+                    MouseButton::Left => show_settings(tray.app_handle()),
+                    MouseButton::Right => show_tray_popup(tray.app_handle(), position),
+                    _ => {}
+                }
             }
         })
         .build(app)?;
@@ -315,72 +240,107 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn spawn_usage_refresh_thread(handle: tauri::AppHandle) {
-    thread::spawn(move || {
-        let mut last_line = String::new();
-        loop {
-            let line = status_path()
-                .ok()
-                .and_then(|path| fs::read_to_string(path).ok())
-                .map(|raw| raw.trim().to_string())
-                .unwrap_or_default();
-            if line != last_line {
-                last_line.clone_from(&line);
-                sync_usage_menu(&handle, &line);
+fn hide_tray_popup_on_blur(app: &mut tauri::App) {
+    if let Some(window) = app.get_webview_window("tray") {
+        let window_to_hide = window.clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::Focused(false) = event {
+                let _ = window_to_hide.hide();
             }
-            thread::sleep(Duration::from_secs(2));
-        }
+        });
+    }
+}
+
+fn show_tray_popup(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    let Some(window) = app.get_webview_window("tray") else {
+        return;
+    };
+
+    let size = window.outer_size().unwrap_or(tauri::PhysicalSize {
+        width: 300,
+        height: 380,
     });
+    let mut x = cursor.x - size.width as f64;
+    let mut y = cursor.y - size.height as f64 - 8.0;
+    if let Ok(Some(monitor)) = app.monitor_from_point(cursor.x, cursor.y) {
+        let bounds = monitor.position();
+        let area = monitor.size();
+        x = x.clamp(
+            bounds.x as f64,
+            (bounds.x + area.width as i32) as f64 - size.width as f64,
+        );
+        y = y.clamp(
+            bounds.y as f64,
+            (bounds.y + area.height as i32) as f64 - size.height as f64,
+        );
+    }
+
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    let _ = app.emit_to("tray", "tray:refresh", ());
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
-fn sync_usage_menu(app: &tauri::AppHandle, status_line: &str) {
-    let labels = parse_status_usage(status_line);
-    let state = app.state::<TrayMenuState>();
-    let usage_5h = state
-        .usage_5h
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let usage_week = state
-        .usage_week
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let usage_spark_5h = state
-        .usage_spark_5h
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    let usage_spark_week = state
-        .usage_spark_week
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-
-    if let Some(item) = usage_5h {
-        let _ = item.set_text(format!("5h: {}", labels.primary.as_deref().unwrap_or("—")));
-    }
-    if let Some(item) = usage_week {
-        let _ = item.set_text(format!(
-            "Week: {}",
-            labels.secondary.as_deref().unwrap_or("—")
-        ));
-    }
-    if let Some(item) = usage_spark_5h {
-        let _ = item.set_text(format!(
-            "Spark 5h: {}",
-            labels.spark_primary.as_deref().unwrap_or("—")
-        ));
-    }
-    if let Some(item) = usage_spark_week {
-        let _ = item.set_text(format!(
-            "Spark week: {}",
-            labels.spark_secondary.as_deref().unwrap_or("—")
-        ));
-    }
+#[derive(Debug, Clone, Serialize)]
+struct TraySnapshot {
+    state: String,
+    model: String,
+    usage: UsageLabels,
+    discord: String,
+    startup_label: &'static str,
+    startup_enabled: bool,
 }
 
-#[derive(Default)]
+#[tauri::command]
+fn tray_snapshot() -> Result<TraySnapshot, String> {
+    let line = status_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|raw| raw.trim().to_string())
+        .unwrap_or_default();
+    let mut parts = line.split('|');
+    let state = parts.next().unwrap_or("Codex: Off").trim().to_string();
+    let model = parts.next().unwrap_or("").trim().to_string();
+    let _usage_field = parts.next();
+    let discord = parts.next().unwrap_or("").trim().to_string();
+
+    Ok(TraySnapshot {
+        state: if state.is_empty() {
+            "Codex: Off".into()
+        } else {
+            state
+        },
+        model,
+        usage: parse_status_usage(&line),
+        discord,
+        startup_label: startup_menu_label(),
+        startup_enabled: startup_enabled(),
+    })
+}
+
+#[tauri::command]
+fn toggle_startup() -> Result<bool, String> {
+    set_startup_enabled(!startup_enabled())?;
+    Ok(startup_enabled())
+}
+
+#[tauri::command]
+fn open_settings_from_tray(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("tray") {
+        let _ = window.hide();
+    }
+    show_settings(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, state: tauri::State<'_, DaemonState>) -> Result<(), String> {
+    stop_daemon(&state);
+    app.exit(0);
+    Ok(())
+}
+
+#[derive(Default, Debug, Clone, Serialize)]
 struct UsageLabels {
     primary: Option<String>,
     secondary: Option<String>,
@@ -423,18 +383,6 @@ fn parse_status_usage(status_line: &str) -> UsageLabels {
         }
     }
     labels
-}
-
-fn sync_startup_menu(app: &tauri::AppHandle) {
-    let startup = app
-        .state::<TrayMenuState>()
-        .startup
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone();
-    if let Some(item) = startup {
-        let _ = item.set_checked(startup_enabled());
-    }
 }
 
 #[cfg(windows)]
